@@ -14,9 +14,9 @@ func InitWebAuthn() {
 
 	// Create WebAuthn configuration
 	wconfig := &webauthn.Config{
-		RPDisplayName: "Appsensi Passkeys",               // Display Name for your site
-		RPID:          "localhost",                       // Generally the FQDN for your site
-		RPOrigins:     []string{"http://localhost:3000"}, // The origin URLs allowed for WebAuthn requests
+		RPDisplayName: "Appsensi Passkeys", // Display Name for your site
+		RPID:          "localhost",         // Generally the FQDN for your site
+		RPOrigins:     GetAllowedOrigins(), // The origin URLs allowed for WebAuthn requests
 		// RPIcon: "https://your-site.com/logo.png", // Optional
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
 			AuthenticatorAttachment: protocol.CrossPlatform,

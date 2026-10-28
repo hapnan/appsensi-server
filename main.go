@@ -17,11 +17,12 @@ func main() {
 	config.InitWebAuthn()
 
 	r := gin.Default()
+	r.Use(config.CORSMiddleware())
 	// WebAuthn Routes
-	r.GET("/register/begin", controllers.BeginRegistration)
+	r.POST("/register/begin", controllers.BeginRegistration)
 	r.POST("/register/finish", controllers.FinishRegistration)
 
-	r.GET("/login/begin", controllers.BeginLogin)
+	r.POST("/login/begin", controllers.BeginLogin)
 	r.POST("/login/finish", controllers.FinishLogin)
 
 	r.GET("/ping", func(c *gin.Context) {

@@ -9,13 +9,14 @@ import (
 
 // User corresponds to the "users" table
 type User struct {
-	ID          uuid.UUID    `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
-	Email       string       `gorm:"type:text;not null;unique" json:"email"`
-	Username    string       `gorm:"type:text;not null;unique" json:"username"`
-	DisplayName *string      `gorm:"type:text" json:"display_name"`
-	Credentials []Credential `gorm:"foreignKey:UserID" json:"-"`
-	CreatedAt   time.Time    `gorm:"type:timestamptz;not null;default:now()" json:"created_at"`
-	UpdatedAt   *time.Time   `gorm:"type:timestamptz;autoUpdateTime" json:"updated_at"`
+	ID           uuid.UUID     `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	Email        string        `gorm:"type:text;not null;unique" json:"email"`
+	Username     string        `gorm:"type:text;not null;unique" json:"username"`
+	DisplayName  *string       `gorm:"type:text" json:"display_name"`
+	WebAuthnUser *WebAuthnUser `gorm:"foreignKey:UserID" json:"-"`
+	Credentials  []Credential  `gorm:"foreignKey:UserID" json:"-"`
+	CreatedAt    time.Time     `gorm:"type:timestamptz;not null;default:now()" json:"created_at"`
+	UpdatedAt    *time.Time    `gorm:"type:timestamptz;autoUpdateTime" json:"updated_at"`
 }
 
 func (User) TableName() string { return "users" }
@@ -23,9 +24,12 @@ func (User) TableName() string { return "users" }
 // Ensure User implements webauthn.User interface
 var _ webauthn.User = &User{}
 
-// WebAuthnID returns the user's ID as a byte array (UUID string bytes)
+// WebAuthnID returns the opaque WebAuthn User Handle from webauthn_users
 func (u *User) WebAuthnID() []byte {
-	return []byte(u.ID.String())
+	if u.WebAuthnUser != nil {
+		return u.WebAuthnUser.Handle
+	}
+	return nil
 }
 
 // WebAuthnName returns the user's username
@@ -41,7 +45,7 @@ func (u *User) WebAuthnDisplayName() string {
 	return u.Username
 }
 
-// WebAuthnIcon is not implemented
+// WebAuthnIcon is deprecated in the spec, return empty string
 func (u *User) WebAuthnIcon() string {
 	return ""
 }
@@ -61,6 +65,7 @@ func (u *User) WebAuthnCredentials() []webauthn.Credential {
 				BackupState:    cred.BackupState,
 			},
 			Authenticator: webauthn.Authenticator{
+				AAGUID:       cred.AAGUID,
 				CloneWarning: cred.CloneWarning,
 				SignCount:    uint32(cred.SignCount),
 			},
@@ -73,11 +78,11 @@ func (u *User) WebAuthnCredentials() []webauthn.Credential {
 // WebAuthnUser corresponds to the "webauthn_users" table
 type WebAuthnUser struct {
 	ID        uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
-	UserID    uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:webauthn_users_user_rp_idx" json:"user_id"`
-	User      User      `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE" json:"-"`
-	RpID      string    `gorm:"type:text;not null" json:"rp_id"`
-	Handler   []byte    `gorm:"type:bytea;not null" json:"handler"`
 	CreatedAt time.Time `gorm:"type:timestamptz;not null;default:now()" json:"created_at"`
+	RpID      string    `gorm:"column:rp_id;type:varchar(512);not null;uniqueIndex:webauthn_users_user_id_key;uniqueIndex:webauthn_users_handle_key" json:"rp_id"`
+	UserID    uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:webauthn_users_user_id_key" json:"user_id"`
+	User      User      `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE" json:"-"`
+	Handle    []byte    `gorm:"type:bytea;not null;uniqueIndex:webauthn_users_handle_key" json:"handle"`
 }
 
 func (WebAuthnUser) TableName() string { return "webauthn_users" }
@@ -88,7 +93,7 @@ type Credential struct {
 	UserID            uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex:credentials_user_credential_idx" json:"user_id"`
 	User              User       `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE" json:"-"`
 	CredentialID      []byte     `gorm:"type:bytea;not null;unique;uniqueIndex:credentials_user_credential_idx" json:"credential_id"`
-	AAGUID            []byte     `gorm:"type:bytea;not null" json:"aaguid"`
+	AAGUID            []byte     `gorm:"column:aaguid;type:bytea;not null" json:"aaguid"`
 	PublicKey         []byte     `gorm:"type:bytea;not null" json:"public_key"`
 	AttestationType   string     `gorm:"type:text;not null" json:"attestation_type"`
 	AttestationFormat string     `gorm:"type:text;not null" json:"attestation_format"`
