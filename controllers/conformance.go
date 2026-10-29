@@ -631,6 +631,18 @@ func ConformanceAttestationResult(c *gin.Context) {
 		return
 	}
 
+	if config.ConformanceMDS != nil {
+		if err := config.ConformanceMDS.ValidateAttestationTrustAnchor(
+			c.Request.Context(),
+			parsedResponse.Response.AttestationObject.Format,
+			parsedResponse.Response.AttestationObject.AuthData.AttData.AAGUID,
+			parsedResponse.Response.AttestationObject.AttStatement,
+		); err != nil {
+			conformanceFail(c, fmt.Sprintf("attestation verification failed: %v", err))
+			return
+		}
+	}
+
 	exists, err := store.CredentialExists(cred.ID)
 	if err != nil {
 		conformanceFail(c, "failed to verify credential uniqueness")

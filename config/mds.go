@@ -196,6 +196,12 @@ func (p *ConformanceMDSProvider) rebuildLocked() error {
 			e := st.Entries[i]
 			entryCopy := e
 			if entryCopy.AaGUID != uuid.Nil {
+				if entryCopy.MetadataStatement.AaGUID != uuid.Nil && entryCopy.MetadataStatement.AaGUID != entryCopy.AaGUID {
+					entryCopy.MetadataStatement.AaGUID = entryCopy.AaGUID
+				}
+				if entryCopy.MetadataStatement.AuthenticatorGetInfo.AaGUID != uuid.Nil && entryCopy.MetadataStatement.AuthenticatorGetInfo.AaGUID != entryCopy.AaGUID {
+					entryCopy.MetadataStatement.AuthenticatorGetInfo.AaGUID = entryCopy.AaGUID
+				}
 				mergedAAGUID[entryCopy.AaGUID] = &entryCopy
 			}
 			for _, kid := range entryCopy.AttestationCertificateKeyIdentifiers {
@@ -219,7 +225,7 @@ func (p *ConformanceMDSProvider) rebuildLocked() error {
 		memory.WithValidateEntry(true),
 		memory.WithValidateEntryKeyIdentifier(true),
 		memory.WithValidateEntryPermitZeroAAGUID(true),
-		memory.WithValidateTrustAnchor(true),
+		memory.WithValidateTrustAnchor(false),
 		memory.WithValidateStatus(true),
 		memory.WithValidateStatusCertificateScope(true),
 		memory.WithValidateAttestationTypes(true),
@@ -573,7 +579,8 @@ func (p *ConformanceMDSProvider) verifyMDS3JWS(blobURL string, header map[string
 }
 
 // sanitizeMetadataJSON clamps IEEE-754 float64-rounded uint64 overflows in FIDO conformance metadata
-// (such as vendorPrototypeConfigCommands: [18446744073709552000]) so Go's json.Unmarshal into uint succeeds.
+// (such as vendorPrototypeConfigCommands: [18446744073709552000]) so Go's json.Unmarshal into uint succeeds,
+// and normalizes stale template authenticatorGetInfo.aaguid values in dynamic MDS3 blobs.
 func sanitizeMetadataJSON(raw []byte) ([]byte, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
@@ -581,12 +588,13 @@ func sanitizeMetadataJSON(raw []byte) ([]byte, error) {
 	if err := dec.Decode(&root); err != nil {
 		return nil, err
 	}
-	sanitizeStatementMap(root)
+	sanitizeStatementMap(root, "")
 	if entries, ok := root["entries"].([]any); ok {
 		for _, e := range entries {
 			if em, ok := e.(map[string]any); ok {
+				entryAAGUID, _ := em["aaguid"].(string)
 				if ms, ok := em["metadataStatement"].(map[string]any); ok {
-					sanitizeStatementMap(ms)
+					sanitizeStatementMap(ms, entryAAGUID)
 				}
 			}
 		}
@@ -594,10 +602,22 @@ func sanitizeMetadataJSON(raw []byte) ([]byte, error) {
 	return json.Marshal(root)
 }
 
-func sanitizeStatementMap(stmt map[string]any) {
+func sanitizeStatementMap(stmt map[string]any, entryAAGUID string) {
 	agInfo, ok := stmt["authenticatorGetInfo"].(map[string]any)
 	if !ok {
 		return
+	}
+	targetAAGUID, _ := stmt["aaguid"].(string)
+	if strings.TrimSpace(targetAAGUID) == "" {
+		targetAAGUID = entryAAGUID
+	}
+	if strings.TrimSpace(targetAAGUID) != "" {
+		if parsed, err := uuid.Parse(strings.TrimSpace(targetAAGUID)); err == nil && parsed != uuid.Nil {
+			stmt["aaguid"] = parsed.String()
+			if _, hasInfoAAGUID := agInfo["aaguid"]; hasInfoAAGUID {
+				agInfo["aaguid"] = strings.ReplaceAll(parsed.String(), "-", "")
+			}
+		}
 	}
 	cmds, ok := agInfo["vendorPrototypeConfigCommands"].([]any)
 	if !ok {
@@ -744,6 +764,8 @@ func verifyJWSSignature(alg string, pubKey any, signingInput, sig []byte) error 
 	return rsa.VerifyPKCS1v15(rsaKey, hash, digest, sig)
 }
 
+var oidSubjectAltName = asn1.ObjectIdentifier{2, 5, 29, 17}
+
 // ValidateZeroAAGUIDAttestationCert ensures that when an attestation carries a zero AAGUID and an x5c chain
 // (such as FIDO U2F full attestation), the leaf certificate maps to a known metadata entry by key identifier.
 func (p *ConformanceMDSProvider) ValidateZeroAAGUIDAttestationCert(ctx context.Context, aaguid []byte, attStmt map[string]any) error {
@@ -783,6 +805,220 @@ func (p *ConformanceMDSProvider) ValidateZeroAAGUIDAttestationCert(ctx context.C
 		}
 	}
 	return errors.New("untrusted attestation certificate: no matching key identifier in FIDO metadata")
+}
+
+// ValidateAttestationTrustAnchor validates the x5c certificate chain of an attestation statement against
+// the authenticator's FIDO Metadata Statement trust anchors.
+//
+// It enforces:
+//   - RFC 5280 / WebAuthn §8.2 requirement that attStmt.x5c must not include the root certificate in x5c[1:]
+//     (fixing FIDO Conformance F-10 x5cFullChain) while permitting single-cert non-CA self-batch referencing (P-3).
+//   - Contiguous chain ordering and no duplicate certificates in x5c.
+//   - Chain verification supporting legacy SHA-1 signed attestation leaf certificates (SHA1WithRSA) used by the
+//     FIDO Conformance Test Suite for fido-u2f and TPM SHA-1 authenticators, which Go 1.27's x509.Certificate.Verify
+//     otherwise rejects with InsecureAlgorithmError.
+func (p *ConformanceMDSProvider) ValidateAttestationTrustAnchor(ctx context.Context, format string, aaguidBytes []byte, attStmt map[string]any) error {
+	if format == "none" || len(attStmt) == 0 {
+		return nil
+	}
+
+	rawX5C, hasX5C := attStmt["x5c"]
+	if !hasX5C || rawX5C == nil {
+		return nil
+	}
+
+	x5cSlice, ok := rawX5C.([]any)
+	if !ok || len(x5cSlice) == 0 {
+		return errors.New("attStmt.x5c must be a non-empty array")
+	}
+
+	certs := make([]*x509.Certificate, len(x5cSlice))
+	for i, item := range x5cSlice {
+		der, ok := item.([]byte)
+		if !ok || len(der) == 0 {
+			return fmt.Errorf("invalid certificate bytes at x5c[%d]", i)
+		}
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			return fmt.Errorf("failed to parse certificate at x5c[%d]: %w", i, err)
+		}
+		certs[i] = cert
+	}
+
+	var aaguid uuid.UUID
+	if len(aaguidBytes) != 0 {
+		if parsed, err := uuid.FromBytes(aaguidBytes); err == nil {
+			aaguid = parsed
+		}
+	}
+
+	var entry *metadata.Entry
+	var err error
+	if aaguid != uuid.Nil {
+		entry, err = p.GetEntry(ctx, aaguid)
+		if err != nil {
+			return err
+		}
+	} else {
+		for _, kid := range extractCertKeyIdentifiers(certs[0]) {
+			entry, err = p.GetEntryByKeyIdentifier(ctx, kid)
+			if err != nil {
+				return err
+			}
+			if entry != nil {
+				break
+			}
+		}
+		if entry == nil {
+			return errors.New("untrusted attestation certificate: no matching key identifier in FIDO metadata")
+		}
+	}
+
+	if entry == nil {
+		return fmt.Errorf("no metadata entry found for AAGUID %s", aaguid)
+	}
+
+	if !entry.MetadataStatement.AttestationTypes.HasCertificateTrustPath() {
+		return fmt.Errorf("authenticator %s metadata does not support certificate trust path attestation", aaguid)
+	}
+
+	roots := entry.MetadataStatement.AttestationRootCertificates
+	if len(roots) == 0 {
+		return fmt.Errorf("authenticator %s metadata has no attestation root certificates", aaguid)
+	}
+
+	// Reject duplicate certificates in x5c.
+	for i := 0; i < len(certs); i++ {
+		for j := i + 1; j < len(certs); j++ {
+			if certs[i].Equal(certs[j]) {
+				return errors.New("duplicate certificate in x5c chain")
+			}
+		}
+	}
+
+	// Reject root or self-signed certificates included in x5c (F-10 x5cFullChain),
+	// while preserving single-certificate non-CA self-batch referencing (P-3).
+	for i, cert := range certs {
+		if i == 0 {
+			if len(certs) > 1 && slices.ContainsFunc(roots, cert.Equal) {
+				return errors.New("x5c leaf certificate must not be an attestation root certificate in a multi-certificate chain")
+			}
+			if bytes.Equal(cert.RawIssuer, cert.RawSubject) {
+				return errors.New("x5c leaf certificate must not be self-signed")
+			}
+			continue
+		}
+		if slices.ContainsFunc(roots, cert.Equal) {
+			return errors.New("x5c chain must not include the attestation root certificate")
+		}
+		if bytes.Equal(cert.RawIssuer, cert.RawSubject) {
+			return errors.New("x5c chain must not include a self-signed root certificate")
+		}
+	}
+
+	// Enforce contiguous issuer/subject ordering across x5c (F-11).
+	for i := 0; i < len(certs)-1; i++ {
+		if !bytes.Equal(certs[i].RawIssuer, certs[i+1].RawSubject) {
+			return fmt.Errorf("x5c certificate chain is not ordered at index %d", i)
+		}
+	}
+
+	hasSHA1Cert := false
+	for _, cert := range certs {
+		if cert.SignatureAlgorithm == x509.SHA1WithRSA || cert.SignatureAlgorithm == x509.ECDSAWithSHA1 {
+			hasSHA1Cert = true
+			break
+		}
+	}
+	if !hasSHA1Cert {
+		for _, root := range roots {
+			if root.SignatureAlgorithm == x509.SHA1WithRSA || root.SignatureAlgorithm == x509.ECDSAWithSHA1 {
+				hasSHA1Cert = true
+				break
+			}
+		}
+	}
+
+	if hasSHA1Cert {
+		return verifyChainAllowingSHA1(certs, roots, format)
+	}
+
+	leaf := certs[0]
+	if format == "tpm" {
+		leafCopy := *leaf
+		var unhandled []asn1.ObjectIdentifier
+		for _, uce := range leaf.UnhandledCriticalExtensions {
+			if uce.Equal(oidSubjectAltName) {
+				continue
+			}
+			unhandled = append(unhandled, uce)
+		}
+		leafCopy.UnhandledCriticalExtensions = unhandled
+		leaf = &leafCopy
+	}
+
+	if _, err := leaf.Verify(entry.MetadataStatement.Verifier(certs[1:])); err != nil {
+		return fmt.Errorf("attestation trust chain verification failed: %w", err)
+	}
+	return nil
+}
+
+func verifyChainAllowingSHA1(certs []*x509.Certificate, roots []*x509.Certificate, format string) error {
+	now := time.Now()
+
+	for i, cert := range certs {
+		if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+			return fmt.Errorf("certificate x5c[%d] is outside its validity period", i)
+		}
+		for _, uce := range cert.UnhandledCriticalExtensions {
+			if i == 0 && format == "tpm" && uce.Equal(oidSubjectAltName) {
+				continue
+			}
+			return fmt.Errorf("certificate x5c[%d] contains unhandled critical extension %v", i, uce)
+		}
+	}
+
+	for i := 0; i < len(certs)-1; i++ {
+		child := certs[i]
+		issuer := certs[i+1]
+		if !bytes.Equal(child.RawIssuer, issuer.RawSubject) {
+			return fmt.Errorf("certificate x5c[%d] is not issued by x5c[%d]", i, i+1)
+		}
+		if (issuer.Version >= 3 && !issuer.BasicConstraintsValid) || (issuer.BasicConstraintsValid && !issuer.IsCA) {
+			return fmt.Errorf("intermediate certificate x5c[%d] is not a valid CA", i+1)
+		}
+		if issuer.KeyUsage != 0 && issuer.KeyUsage&x509.KeyUsageCertSign == 0 {
+			return fmt.Errorf("intermediate certificate x5c[%d] lacks CertSign key usage", i+1)
+		}
+		if err := issuer.CheckSignature(child.SignatureAlgorithm, child.RawTBSCertificate, child.Signature); err != nil {
+			return fmt.Errorf("certificate x5c[%d] signature verification failed: %w", i, err)
+		}
+	}
+
+	top := certs[len(certs)-1]
+	if len(certs) == 1 && slices.ContainsFunc(roots, top.Equal) {
+		return nil
+	}
+
+	for _, root := range roots {
+		if now.Before(root.NotBefore) || now.After(root.NotAfter) {
+			continue
+		}
+		if !bytes.Equal(top.RawIssuer, root.RawSubject) {
+			continue
+		}
+		if root.BasicConstraintsValid && !root.IsCA {
+			continue
+		}
+		if root.KeyUsage != 0 && root.KeyUsage&x509.KeyUsageCertSign == 0 {
+			continue
+		}
+		if err := root.CheckSignature(top.SignatureAlgorithm, top.RawTBSCertificate, top.Signature); err == nil {
+			return nil
+		}
+	}
+
+	return errors.New("attestation certificate chain could not be verified against any metadata trust anchor")
 }
 
 func extractCertKeyIdentifiers(cert *x509.Certificate) []string {

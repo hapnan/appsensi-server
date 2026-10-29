@@ -143,6 +143,11 @@ func makeMDSBlobPayload(no int, nextUpdate string, aaguid string, status string)
 					"attachmentHint":              []any{"external"},
 					"tcDisplay":                   []any{},
 					"attestationRootCertificates": []any{},
+					"authenticatorGetInfo": map[string]any{
+						"versions": []any{"U2F_V2", "FIDO_2_0"},
+						// Simulate mds3.fido.tools fido2_good leaving the static template AAGUID in authenticatorGetInfo
+						"aaguid": "326adcf00cef46d0939298d6c4a84a72",
+					},
 				},
 			},
 		},
@@ -379,6 +384,10 @@ func TestDynamicMDS3BlobsAndRefresh(t *testing.T) {
 	e1, err := prov.GetEntry(ctx, uuid.MustParse(validX5CAAGUID))
 	if err != nil || e1 == nil {
 		t.Fatalf("expected valid x5c entry, got entry=%v err=%v", e1, err)
+	}
+	if e1.MetadataStatement.AuthenticatorGetInfo.AaGUID != uuid.MustParse(validX5CAAGUID) {
+		t.Fatalf("expected authenticatorGetInfo.aaguid to be normalized to %s, got %s",
+			validX5CAAGUID, e1.MetadataStatement.AuthenticatorGetInfo.AaGUID)
 	}
 	if err := prov.ValidateStatusReports(ctx, e1.StatusReports); err != nil {
 		t.Fatalf("expected FIDO_CERTIFIED status to pass, got %v", err)
