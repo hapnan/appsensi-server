@@ -15,6 +15,9 @@ func main() {
 	// Initialize configurations
 	database.InitDB()
 	config.InitWebAuthn()
+	if config.IsConformanceEnabled() {
+		config.InitConformanceWebAuthn()
+	}
 
 	r := gin.Default()
 	r.Use(config.CORSMiddleware())
@@ -24,6 +27,13 @@ func main() {
 
 	r.POST("/login/begin", controllers.BeginLogin)
 	r.POST("/login/finish", controllers.FinishLogin)
+
+	if config.IsConformanceEnabled() {
+		r.POST("/attestation/options", controllers.ConformanceAttestationOptions)
+		r.POST("/attestation/result", controllers.ConformanceAttestationResult)
+		r.POST("/assertion/options", controllers.ConformanceAssertionOptions)
+		r.POST("/assertion/result", controllers.ConformanceAssertionResult)
+	}
 
 	r.GET("/ping", func(c *gin.Context) {
 		c.JSON(200, gin.H{

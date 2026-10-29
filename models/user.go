@@ -1,8 +1,10 @@
 package models
 
 import (
+	"strings"
 	"time"
 
+	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
 )
@@ -54,10 +56,21 @@ func (u *User) WebAuthnIcon() string {
 func (u *User) WebAuthnCredentials() []webauthn.Credential {
 	var webauthnCreds []webauthn.Credential
 	for _, cred := range u.Credentials {
+		var transports []protocol.AuthenticatorTransport
+		if cred.Transport != "" {
+			for _, t := range strings.Split(cred.Transport, ",") {
+				if trimmed := strings.TrimSpace(t); trimmed != "" {
+					transports = append(transports, protocol.AuthenticatorTransport(trimmed))
+				}
+			}
+		}
+
 		webauthnCred := webauthn.Credential{
-			ID:              cred.CredentialID,
-			PublicKey:       cred.PublicKey,
-			AttestationType: cred.AttestationType,
+			ID:                cred.CredentialID,
+			PublicKey:         cred.PublicKey,
+			AttestationType:   cred.AttestationType,
+			AttestationFormat: cred.AttestationFormat,
+			Transport:         transports,
 			Flags: webauthn.CredentialFlags{
 				UserPresent:    cred.Presence,
 				UserVerified:   cred.Verified,
@@ -68,6 +81,7 @@ func (u *User) WebAuthnCredentials() []webauthn.Credential {
 				AAGUID:       cred.AAGUID,
 				CloneWarning: cred.CloneWarning,
 				SignCount:    uint32(cred.SignCount),
+				Attachment:   protocol.AuthenticatorAttachment(cred.Attachment),
 			},
 		}
 		webauthnCreds = append(webauthnCreds, webauthnCred)

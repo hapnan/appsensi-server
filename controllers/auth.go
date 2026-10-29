@@ -210,18 +210,28 @@ func FinishRegistration(c *gin.Context) {
 		transports[i] = string(t)
 	}
 
+	aaguid := parsedResponse.Authenticator.AAGUID
+	if aaguid == nil {
+		aaguid = []byte{}
+	}
+	attFormat := parsedResponse.AttestationFormat
+	if attFormat == "" {
+		attFormat = parsedResponse.AttestationType
+	}
+
 	newCred := models.Credential{
 		UserID:            user.ID,
 		CredentialID:      parsedResponse.ID,
 		PublicKey:         parsedResponse.PublicKey,
 		AttestationType:   parsedResponse.AttestationType,
-		AttestationFormat: "packed",
+		AttestationFormat: attFormat,
+		Attestation:       parsedResponse.Attestation.Object,
 		Transport:         strings.Join(transports, ","),
 		Flags:             []byte{byte(flags)},
 		Attachment:        string(parsedResponse.Authenticator.Attachment),
 		SignCount:         int64(parsedResponse.Authenticator.SignCount),
 		CloneWarning:      parsedResponse.Authenticator.CloneWarning,
-		AAGUID:            parsedResponse.Authenticator.AAGUID,
+		AAGUID:            aaguid,
 		Presence:          parsedResponse.Flags.UserPresent,
 		Verified:          parsedResponse.Flags.UserVerified,
 		BackupEligible:    parsedResponse.Flags.BackupEligible,

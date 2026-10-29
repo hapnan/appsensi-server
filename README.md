@@ -34,13 +34,18 @@ Backend REST API server for **Appsensi**, a campus academic attendance platform 
 ```text
 appsensi-server/
 ├── config/
-│   ├── cors.go          # ALLOWED_ORIGINS parser & Gin CORS middleware
-│   ├── cors_test.go     # Unit tests for CORS preflight & origin parsing
-│   └── webauthn.go      # go-webauthn Relying Party initialization
+│   ├── cors.go              # ALLOWED_ORIGINS parser & Gin CORS middleware
+│   ├── cors_test.go         # Unit tests for CORS preflight & origin parsing
+│   ├── mds.go               # FIDO Conformance static + dynamic MDS3 metadata provider
+│   ├── mds_test.go          # Unit tests for local MDS loading, MDS3 JWT/x5u/CRL & refresh
+│   └── webauthn.go          # go-webauthn Relying Party & Conformance initialization
 ├── controllers/
-│   └── auth.go          # WebAuthn registration/login handlers & in-memory session store
+│   ├── auth.go              # Production WebAuthn registration/login handlers
+│   ├── conformance.go       # Standardized FIDO2 Conformance Server endpoints
+│   └── conformance_test.go  # End-to-end conformance ceremony & validation tests
 ├── database/
-│   └── db.go            # PostgreSQL GORM connection setup
+│   └── db.go                # PostgreSQL GORM connection setup
+├── fido-conformance-mds/    # FIDO Alliance conformance authenticator metadata JSON statements
 ├── models/
 │   ├── academic.go      # Building, Room, Faculty, Course, ClassSchedule models
 │   ├── schema_test.go   # Unit tests verifying GORM column-to-JSON tag alignment
@@ -300,7 +305,45 @@ go test -v ./...
 
 Current test suites cover:
 - **`config/cors_test.go`**: `ALLOWED_ORIGINS` parsing (whitespace/trailing-slash normalization) and CORS middleware responses for allowed origins, credential headers, and disallowed preflight requests.
+- **`config/mds_test.go`**: Loading all 25 FIDO Conformance metadata JSON files (`fido-conformance-mds/`), COSE algorithm support (`ES256K` / `RS1`), zero-AAGUID U2F key-identifier verification, and dynamic MDS3 JWT blob verification (`x5c`, `x5u`, CRL revocation, poisoned blob isolation, and `nextUpdate` refreshes).
+- **`controllers/conformance_test.go`**: End-to-end FIDO2 Conformance registration and assertion ceremonies (`/attestation/*`, `/assertion/*`), strict input validation, `getClientExtensionResults` mapping, duplicate credential rejection, and `signCount` regression (`CloneWarning`) rejection.
 - **`models/schema_test.go`**: Verifies that every GORM model column name matches its `json` struct tag (including explicit column overrides such as `Credential.AAGUID` -> `aaguid` and `WebAuthnUser.RpID` -> `rp_id`).
+
+---
+
+## FIDO2 Conformance Testing
+
+`appsensi-server` includes a dedicated FIDO Alliance Certification Conformance mode gated behind `FIDO_CONFORMANCE=true`. When disabled (the default), only production routes (`/register/*`, `/login/*`) are mounted.
+
+### Conformance Environment Variables
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `FIDO_CONFORMANCE` | `false` | Set to `true` to mount `/attestation/options`, `/attestation/result`, `/assertion/options`, and `/assertion/result`. |
+| `RP_ID` | `localhost` | Relying Party ID matching the host entered in the FIDO Conformance Tool. |
+| `FIDO_MDS_DIR` | `fido-conformance-mds` | Directory containing local FIDO Conformance authenticator metadata `.json` files. |
+| `FIDO_MDS3_ENABLED` | `false` | Set to `true` when running the optional **MDS3** dynamic metadata test add-on. |
+| `FIDO_CONFORMANCE_ENDPOINT` | `http://localhost:<PORT>` | Server URL sent to `POST /getEndpoints` when `FIDO_MDS3_ENABLED=true` (also added to allowed WebAuthn/CORS origins). |
+| `FIDO_MDS3_ENDPOINTS_URL` | `https://mds3.fido.tools/getEndpoints` | Dynamic MDS3 `getEndpoints` URL. |
+| `FIDO_MDS3_ROOT_CERT_URL` | `https://mds3.fido.tools/pki/MDS3ROOT.crt` | MDS3 root CA certificate URL (or set `FIDO_MDS3_ROOT_CERT_PATH` for a local file). |
+
+### Running FIDO Conformance Testing Tools
+
+1. **Ensure PostgreSQL is running** with the `users`, `webauthn_users`, and `credentials` tables migrated (no `students` records need to be seeded for conformance tests).
+2. **Start the server in conformance mode** (PowerShell):
+   ```powershell
+   $env:PORT = "8080"
+   $env:RP_ID = "localhost"
+   $env:FIDO_CONFORMANCE = "true"
+   # Optional: enable only when checking the MDS3 add-on in the FIDO Conformance Tool
+   # $env:FIDO_MDS3_ENABLED = "true"
+   # $env:FIDO_CONFORMANCE_ENDPOINT = "http://localhost:8080"
+   go run main.go
+   ```
+3. **Run the FIDO Conformance Testing Tools desktop application**:
+   - Select **FIDO2** -> **Server** test suite.
+   - Set **Server URL** to `http://localhost:8080`.
+   - Click **RUN**.
 
 ---
 
