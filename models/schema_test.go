@@ -122,6 +122,43 @@ func TestStudentAndAttendanceSchemaAlignment(t *testing.T) {
 			t.Errorf("attendance_student_room_day_idx field[%d] = %q, want %q", i, uniqueIdx.Fields[i].DBName, want)
 		}
 	}
+
+	assertSchemaIndexColumns(t, ssSchema, "student_schedules_class_status_idx", []string{"class_schedule_id", "status"})
+	assertSchemaIndexColumns(t, attSchema, "attendance_schedule_date_idx", []string{"class_schedule_id", "session_date"})
+
+	wuSchema, err := schema.Parse(&WebAuthnUser{}, cache, namer)
+	if err != nil {
+		t.Fatalf("failed to parse WebAuthnUser schema: %v", err)
+	}
+	assertSchemaIndexColumns(t, wuSchema, "webauthn_users_user_idx", []string{"user_id"})
+
+	credSchema, err := schema.Parse(&Credential{}, cache, namer)
+	if err != nil {
+		t.Fatalf("failed to parse Credential schema: %v", err)
+	}
+	assertSchemaIndexColumns(t, credSchema, "credentials_user_credential_idx", []string{"user_id", "credential_id"})
+}
+
+func assertSchemaIndexColumns(t *testing.T, s *schema.Schema, idxName string, wantCols []string) {
+	t.Helper()
+	var found *schema.Index
+	for _, idx := range s.ParseIndexes() {
+		if idx.Name == idxName {
+			found = idx
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("index %q not found on %s schema", idxName, s.Name)
+	}
+	if len(found.Fields) != len(wantCols) {
+		t.Fatalf("index %q field count = %d, want %d", idxName, len(found.Fields), len(wantCols))
+	}
+	for i, want := range wantCols {
+		if found.Fields[i].DBName != want {
+			t.Errorf("index %q field[%d] = %q, want %q", idxName, i, found.Fields[i].DBName, want)
+		}
+	}
 }
 
 func TestSafeUint32SignCountAndCredentialFlags(t *testing.T) {
