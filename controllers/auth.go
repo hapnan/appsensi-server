@@ -22,23 +22,71 @@ import (
 	"gorm.io/gorm"
 )
 
+const authSessionTTL = 5 * time.Minute
+
+type authSession struct {
+	Ceremony    protocol.CeremonyType
+	SessionData webauthn.SessionData
+	CreatedAt   time.Time
+}
+
 // Thread-safe in-memory session store
 var (
-	sessionStore = make(map[uuid.UUID]webauthn.SessionData)
+	sessionStore = make(map[uuid.UUID]authSession)
 	sessionMu    sync.RWMutex
 )
 
-func saveSession(userID uuid.UUID, data webauthn.SessionData) {
+func saveCeremonySession(userID uuid.UUID, ceremony protocol.CeremonyType, data webauthn.SessionData) {
+	now := time.Now()
 	sessionMu.Lock()
 	defer sessionMu.Unlock()
-	sessionStore[userID] = data
+	for id, sess := range sessionStore {
+		if now.Sub(sess.CreatedAt) > authSessionTTL {
+			delete(sessionStore, id)
+		}
+	}
+	sessionStore[userID] = authSession{
+		Ceremony:    ceremony,
+		SessionData: data,
+		CreatedAt:   now,
+	}
+}
+
+func saveSession(userID uuid.UUID, data webauthn.SessionData) {
+	saveCeremonySession(userID, protocol.CreateCeremony, data)
+}
+
+func getCeremonySession(userID uuid.UUID, ceremony protocol.CeremonyType) (webauthn.SessionData, bool) {
+	now := time.Now()
+	sessionMu.RLock()
+	sess, ok := sessionStore[userID]
+	sessionMu.RUnlock()
+	if !ok {
+		return webauthn.SessionData{}, false
+	}
+	if now.Sub(sess.CreatedAt) > authSessionTTL {
+		deleteSession(userID)
+		return webauthn.SessionData{}, false
+	}
+	if sess.Ceremony != ceremony {
+		return webauthn.SessionData{}, false
+	}
+	return sess.SessionData, true
 }
 
 func getSession(userID uuid.UUID) (webauthn.SessionData, bool) {
+	now := time.Now()
 	sessionMu.RLock()
-	defer sessionMu.RUnlock()
-	data, ok := sessionStore[userID]
-	return data, ok
+	sess, ok := sessionStore[userID]
+	sessionMu.RUnlock()
+	if !ok {
+		return webauthn.SessionData{}, false
+	}
+	if now.Sub(sess.CreatedAt) > authSessionTTL {
+		deleteSession(userID)
+		return webauthn.SessionData{}, false
+	}
+	return sess.SessionData, true
 }
 
 func deleteSession(userID uuid.UUID) {
@@ -47,8 +95,21 @@ func deleteSession(userID uuid.UUID) {
 	delete(sessionStore, userID)
 }
 
-// Helper for REGISTRATION: gets existing user or creates one from Student table
-func getOrCreateUserForRegistration(username string, email string, rpid string) (*models.User, error) {
+// AuthStore abstracts persistence operations for production WebAuthn registration and login endpoints,
+// backed by PostgreSQL (GORM) in production and overridable in unit tests.
+type AuthStore interface {
+	GetOrCreateUserForRegistration(username, email, rpid string) (*models.User, error)
+	GetExistingUserForLogin(username, rpid string) (*models.User, error)
+	SaveCredential(cred *models.Credential) error
+	UpdateCredentialOnLogin(credentialID []byte, signCount int64, cloneWarning bool, lastUsedAt time.Time) error
+}
+
+type gormAuthStore struct{}
+
+var _ AuthStore = gormAuthStore{}
+
+// GetOrCreateUserForRegistration gets an existing user or creates one from the Student table.
+func (gormAuthStore) GetOrCreateUserForRegistration(username string, email string, rpid string) (*models.User, error) {
 	var user models.User
 
 	// Note: Use "rpid = ?" if your DB column is rpid, or "rp_id = ?" if GORM auto-migrated it without column:rpid
@@ -99,8 +160,8 @@ func getOrCreateUserForRegistration(username string, email string, rpid string) 
 	return &user, nil
 }
 
-// Helper for LOGIN: strictly looks up an existing user without creating new DB rows
-func getExistingUserForLogin(username string, rpid string) (*models.User, error) {
+// GetExistingUserForLogin strictly looks up an existing user without creating new DB rows.
+func (gormAuthStore) GetExistingUserForLogin(username string, rpid string) (*models.User, error) {
 	var user models.User
 	err := database.DB.
 		Preload("WebAuthnUser", "rp_id = ?", rpid).
@@ -116,22 +177,78 @@ func getExistingUserForLogin(username string, rpid string) (*models.User, error)
 	return &user, nil
 }
 
+func (gormAuthStore) SaveCredential(cred *models.Credential) error {
+	return database.DB.Create(cred).Error
+}
+
+func (gormAuthStore) UpdateCredentialOnLogin(credentialID []byte, signCount int64, cloneWarning bool, lastUsedAt time.Time) error {
+	return database.DB.Model(&models.Credential{}).
+		Where("credential_id = ?", credentialID).
+		Select("SignCount", "CloneWarning", "LastUsedAt").
+		Updates(models.Credential{
+			SignCount:    signCount,
+			CloneWarning: cloneWarning,
+			LastUsedAt:   &lastUsedAt,
+		}).Error
+}
+
+var (
+	authStoreMu sync.RWMutex
+	authStore   AuthStore = gormAuthStore{}
+)
+
+// SetAuthStore overrides the persistence store for auth endpoints (used by unit tests).
+func SetAuthStore(store AuthStore) {
+	authStoreMu.Lock()
+	defer authStoreMu.Unlock()
+	if store == nil {
+		authStore = gormAuthStore{}
+		return
+	}
+	authStore = store
+}
+
+func getAuthStore() AuthStore {
+	authStoreMu.RLock()
+	defer authStoreMu.RUnlock()
+	return authStore
+}
+
+func restoreBufferedRequestBody(c *gin.Context) bool {
+	bodyVal, ok := c.Get(gin.BodyBytesKey)
+	if !ok {
+		return false
+	}
+	rawBytes, ok := bodyVal.([]byte)
+	if !ok {
+		return false
+	}
+	c.Request.Body = io.NopCloser(bytes.NewReader(rawBytes))
+	return true
+}
+
 type RegistrationRequest struct {
 	Username string `json:"username" binding:"required"`
 	Email    string `json:"email" binding:"required,email"`
 }
 
 func BeginRegistration(c *gin.Context) {
-	var req RegistrationRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "username and valid email are required"})
+	if config.WebAuthn == nil {
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "WebAuthn is not initialized")
 		return
 	}
 
+	var req RegistrationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "username and valid email are required")
+		return
+	}
+
+	store := getAuthStore()
 	rpid := config.WebAuthn.Config.GetRPID()
-	user, err := getOrCreateUserForRegistration(req.Username, req.Email, rpid)
+	user, err := store.GetOrCreateUserForRegistration(req.Username, req.Email, rpid)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get or create user"})
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "failed to get or create user")
 		return
 	}
 
@@ -151,57 +268,50 @@ func BeginRegistration(c *gin.Context) {
 	)
 	if err != nil {
 		log.Printf("BeginRegistration error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to begin registration"})
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "failed to begin registration")
 		return
 	}
 
-	saveSession(user.ID, *sessionData)
+	saveCeremonySession(user.ID, protocol.CreateCeremony, *sessionData)
 	c.JSON(http.StatusOK, options)
 }
 
 func FinishRegistration(c *gin.Context) {
+	if config.WebAuthn == nil {
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "WebAuthn is not initialized")
+		return
+	}
+
 	var req RegistrationRequest
 	if err := c.ShouldBindBodyWithJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "username and valid email are required"})
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "username and valid email are required")
 		return
 	}
-	// Restore request body so go-webauthn can read it
-	if bodyBytes, ok := c.Get(gin.BodyBytesKey); ok {
-		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes.([]byte)))
+	// Restore request body safely so go-webauthn can read it
+	if !restoreBufferedRequestBody(c) {
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "invalid buffered request body")
+		return
 	}
 
+	store := getAuthStore()
 	rpid := config.WebAuthn.Config.GetRPID()
-	user, err := getOrCreateUserForRegistration(req.Username, req.Email, rpid)
+	user, err := store.GetOrCreateUserForRegistration(req.Username, req.Email, rpid)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "user not found"})
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "user not found")
 		return
 	}
 
-	sessionData, ok := getSession(user.ID)
+	sessionData, ok := getCeremonySession(user.ID, protocol.CreateCeremony)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no active registration session found"})
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "no active registration session found")
 		return
 	}
 
 	parsedResponse, err := config.WebAuthn.FinishRegistration(user, sessionData, c.Request)
 	if err != nil {
 		log.Printf("FinishRegistration error: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to finish registration"})
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "failed to finish registration")
 		return
-	}
-
-	var flags uint32
-	if parsedResponse.Flags.UserPresent {
-		flags |= 1
-	}
-	if parsedResponse.Flags.UserVerified {
-		flags |= 2
-	}
-	if parsedResponse.Flags.BackupEligible {
-		flags |= 4
-	}
-	if parsedResponse.Flags.BackupState {
-		flags |= 8
 	}
 
 	// Join transports (e.g. "internal,hybrid") for the non-null Transport column
@@ -227,8 +337,8 @@ func FinishRegistration(c *gin.Context) {
 		AttestationFormat: attFormat,
 		Attestation:       parsedResponse.Attestation.Object,
 		Transport:         strings.Join(transports, ","),
-		Flags:             []byte{byte(flags)},
-		Attachment:        string(parsedResponse.Authenticator.Attachment),
+		Flags:             models.EncodeCredentialFlags(parsedResponse.Flags),
+		Attachment:        parsedResponse.Authenticator.Attachment,
 		SignCount:         int64(parsedResponse.Authenticator.SignCount),
 		CloneWarning:      parsedResponse.Authenticator.CloneWarning,
 		AAGUID:            aaguid,
@@ -238,8 +348,8 @@ func FinishRegistration(c *gin.Context) {
 		BackupState:       parsedResponse.Flags.BackupState,
 	}
 
-	if err := database.DB.Create(&newCred).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save credential"})
+	if err := store.SaveCredential(&newCred); err != nil {
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "failed to save credential")
 		return
 	}
 
@@ -248,7 +358,7 @@ func FinishRegistration(c *gin.Context) {
 	}
 
 	deleteSession(user.ID)
-	c.JSON(http.StatusOK, gin.H{"status": "registration success"})
+	c.JSON(http.StatusOK, AuthStatusResponse{Status: "registration success"})
 }
 
 type LoginRequest struct {
@@ -256,16 +366,22 @@ type LoginRequest struct {
 }
 
 func BeginLogin(c *gin.Context) {
-	var req LoginRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "username is required"})
+	if config.WebAuthn == nil {
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "WebAuthn is not initialized")
 		return
 	}
 
+	var req LoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "username is required")
+		return
+	}
+
+	store := getAuthStore()
 	rpid := config.WebAuthn.Config.GetRPID()
-	user, err := getExistingUserForLogin(req.Username, rpid)
+	user, err := store.GetExistingUserForLogin(req.Username, rpid)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "user not found or not registered for WebAuthn"})
+		respondAPIError(c, http.StatusNotFound, ErrCodeNotFound, "user not found or not registered for WebAuthn")
 		return
 	}
 
@@ -275,42 +391,49 @@ func BeginLogin(c *gin.Context) {
 	)
 	if err != nil {
 		log.Printf("BeginLogin error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to begin login"})
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "failed to begin login")
 		return
 	}
 
-	saveSession(user.ID, *sessionData)
+	saveCeremonySession(user.ID, protocol.AssertCeremony, *sessionData)
 	c.JSON(http.StatusOK, options)
 }
 
 func FinishLogin(c *gin.Context) {
+	if config.WebAuthn == nil {
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "WebAuthn is not initialized")
+		return
+	}
+
 	var req LoginRequest
 	// Must use ShouldBindBodyWithJSON and restore c.Request.Body so FinishLogin can read the body!
 	if err := c.ShouldBindBodyWithJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "username is required"})
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "username is required")
 		return
 	}
-	if bodyBytes, ok := c.Get(gin.BodyBytesKey); ok {
-		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes.([]byte)))
+	if !restoreBufferedRequestBody(c) {
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "invalid buffered request body")
+		return
 	}
 
+	store := getAuthStore()
 	rpid := config.WebAuthn.Config.GetRPID()
-	user, err := getExistingUserForLogin(req.Username, rpid)
+	user, err := store.GetExistingUserForLogin(req.Username, rpid)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		respondAPIError(c, http.StatusNotFound, ErrCodeNotFound, "user not found")
 		return
 	}
 
-	sessionData, ok := getSession(user.ID)
+	sessionData, ok := getCeremonySession(user.ID, protocol.AssertCeremony)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no active login session found"})
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "no active login session found")
 		return
 	}
 
 	credential, err := config.WebAuthn.FinishLogin(user, sessionData, c.Request)
 	if err != nil {
 		log.Printf("FinishLogin error: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to verify login assertion"})
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "failed to verify login assertion")
 		return
 	}
 
@@ -320,18 +443,21 @@ func FinishLogin(c *gin.Context) {
 
 	// Update SignCount, CloneWarning, and LastUsedAt in the database
 	now := time.Now()
-	database.DB.Model(&models.Credential{}).
-		Where("credential_id = ?", credential.ID).
-		Updates(map[string]interface{}{
-			"sign_count":    int64(credential.Authenticator.SignCount),
-			"clone_warning": credential.Authenticator.CloneWarning,
-			"last_used_at":  &now,
-		})
+	if err := store.UpdateCredentialOnLogin(
+		credential.ID,
+		int64(credential.Authenticator.SignCount),
+		credential.Authenticator.CloneWarning,
+		now,
+	); err != nil {
+		log.Printf("FinishLogin UpdateCredentialOnLogin error: %v", err)
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "failed to update credential state")
+		return
+	}
 
 	deleteSession(user.ID)
 
-	c.JSON(http.StatusOK, gin.H{
-		"status":  "login success",
-		"message": "User authenticated successfully",
+	c.JSON(http.StatusOK, AuthStatusResponse{
+		Status:  "login success",
+		Message: "User authenticated successfully",
 	})
 }
