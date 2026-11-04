@@ -38,7 +38,13 @@ appsensi-server/
 │   ├── cors_test.go     # Unit test untuk preflight CORS & parsing origin
 │   └── webauthn.go      # Inisialisasi Relying Party go-webauthn
 ├── controllers/
-│   └── auth.go          # Handler registrasi/login WebAuthn & penyimpanan sesi di memori
+│   ├── attendance.go        # Handler katalog ruangan, daftar hadir aktif & pencatatan presensi
+│   ├── attendance_test.go   # Unit test alur katalog, roster & check-in presensi
+│   ├── auth.go              # Handler registrasi/login WebAuthn & penyimpanan sesi di memori
+│   ├── conformance.go       # Endpoint standar FIDO2 Conformance Server
+│   ├── conformance_test.go  # Unit test validasi & alur FIDO2 Conformance
+│   ├── registration.go      # Handler daftar registrasi mahasiswa, penautan user & pembersihan akun
+│   └── registration_test.go # Unit test alur direktori registrasi, penautan & pembersihan akun
 ├── database/
 │   └── db.go            # Konfigurasi koneksi PostgreSQL dengan GORM
 ├── models/
@@ -154,6 +160,12 @@ sequenceDiagram
 | `POST` | `/register/finish` | Memverifikasi respons atestasi dan menyimpan kredensial passkey ke database. |
 | `POST` | `/login/begin` | Menghasilkan opsi tantangan (*assertion*) login WebAuthn bagi pengguna terdaftar. |
 | `POST` | `/login/finish` | Memverifikasi tanda tangan *assertion* dan memperbarui metadata penggunaan kredensial. |
+| `GET` | `/attendance/demo-catalog` | Menampilkan daftar ruang kelas terjadwal beserta sesi kelas mingguannya. |
+| `GET` | `/attendance/roster` | Mengembalikan sesi kelas aktif dan daftar mahasiswa yang belum *check-in*. |
+| `POST` | `/attendance/check-in` | Mencatat kehadiran mahasiswa yang telah terverifikasi pada sesi kelas aktif. |
+| `GET` | `/registration/list` | Menampilkan seluruh mahasiswa beserta status akun WebAuthn & passkey. |
+| `POST` | `/registration/link-student` | Menautkan `students.user_id` ke `users.id` (idempoten). |
+| `POST` | `/registration/cleanup-incomplete` | Menghapus baris `users` belum terverifikasi (tanpa kredensial passkey). |
 
 ### Detail Endpoint
 
@@ -178,7 +190,7 @@ Memulai sesi registrasi WebAuthn. Membuat baris `users` (ditautkan berdasarkan `
 - **Respons (`200 OK`)**: JSON standar `CredentialCreation` WebAuthn (`{ "publicKey": { ... } }`).
 
 #### `POST /register/finish`
-Menyelesaikan proses registrasi passkey. Mengharapkan satu objek JSON yang memuat **`username` dan `email` di level teratas (*top-level*)** digabung langsung dengan respons atestasi `PublicKeyCredential` dari peramban.
+Menyelesaikan proses registrasi passkey. Mengharapkan satu objek JSON yang memuat **`username` dan `email` di level teratas (*top-level*)** digabung langsung dengan respons atestasi `PublicKeyCredential` dari peramban, serta menautkan `students.user_id` ke `users.id` secara otomatis apabila belum tertaut.
 - **Body Permintaan**:
   ```json
   {
@@ -236,6 +248,58 @@ Menyelesaikan autentikasi passkey. Mengharapkan **`username` di level teratas** 
   }
   ```
 
+#### `GET /attendance/demo-catalog`
+Menampilkan seluruh ruang kelas kampus yang memiliki jadwal mata kuliah beserta sesi kelas mingguannya, diurutkan berdasarkan gedung, lantai, dan nomor ruangan.
+- **Respons (`200 OK`)**: `DemoCatalogRoom[]` (`code`, `floor`, `roomNumber`, `buildingCode`, `buildingName`, `facultyCode`, `facultyName`, `schedules`).
+
+#### `GET /attendance/roster`
+Mengembalikan sesi jadwal kelas aktif beserta daftar mahasiswa terdaftar yang belum melakukan *check-in* pada tanggal terkait.
+- **Parameter Query**:
+  - `room` *(wajib)*: Kode ruangan dengan format `building.floor.room` (contoh: `h.2.4`, tidak peka huruf besar/kecil).
+  - `scheduleId` *(opsional)*: UUID `class_schedules.id` eksplisit untuk memilih sesi tertentu pada hari tersebut.
+  - `date` *(opsional)*: Tanggal kalender berformat `YYYY-MM-DD` (bawaan: hari ini menurut waktu server).
+- **Respons (`200 OK`)**: `RosterResult` (`room`, `sessionDate`, `dayOfWeek`, `schedule`, `availableSchedules`, `total`, `present`, `pending`).
+- **Error (`400 Bad Request`)**: Dikembalikan jika format `room`, `scheduleId`, atau `date` tidak valid.
+
+#### `POST /attendance/check-in`
+Mencatat kehadiran mahasiswa ke tabel `attendance` untuk sesi kelas aktif pada suatu ruangan.
+- **Body Permintaan**:
+  ```json
+  {
+    "room": "h.2.4",
+    "studentId": "STU-FCS-001",
+    "scheduleId": "<uuid-opsional>",
+    "date": "2026-11-04"
+  }
+  ```
+- **Respons (`200 OK`)**:
+  ```json
+  {
+    "id": "<student-uuid>",
+    "studentId": "STU-FCS-001",
+    "name": "Nama Mahasiswa",
+    "room": "h.2.4",
+    "sessionDate": "2026-11-04",
+    "checkedInAt": "2026-11-04T09:15:00Z"
+  }
+  ```
+- **Error**: `400 Bad Request` (input tidak valid atau mahasiswa tidak mengambil kelas tersebut), `404 Not Found` (ruangan atau mahasiswa tidak ditemukan), `412 Precondition Failed` (belum mendaftarkan passkey atau tidak ada sesi kelas terjadwal), `409 Conflict` (sudah tercatat hadir).
+
+#### `GET /registration/list`
+Menampilkan seluruh mahasiswa diurutkan berdasarkan `student_id` beserta informasi akun `users` dan status registrasi passkey (`isRegistered`).
+- **Respons (`200 OK`)**: `RegistrationStudentRow[]` (`id`, `name`, `username`, `department`, `userId`, `email`, `createdAt`, `isRegistered`).
+
+#### `POST /registration/link-student`
+Menautkan `students.user_id` ke `users.id` secara idempoten untuk `username` yang telah terdaftar.
+- **Body Permintaan**: `{ "studentId": "<student-uuid>", "username": "STU-FCS-001" }`
+- **Respons (`200 OK`)**: `{ "userId": "<user-uuid>", "email": "mahasiswa@example.edu", "createdAt": "..." }`
+- **Error**: `400 Bad Request`, `404 Not Found`.
+
+#### `POST /registration/cleanup-incomplete`
+Menghapus baris `users` yang belum terverifikasi (memiliki 0 kredensial passkey) dan membersihkan sesi tantangan WebAuthn yang menggantung jika proses registrasi dibatalkan.
+- **Body Permintaan**: `{ "username": "STU-FCS-001" }`
+- **Respons (`200 OK`)**: `{ "cleaned": true }` (atau `{ "cleaned": false }` jika tidak ditemukan atau sudah memiliki kredensial).
+
 ### Perilaku Middleware CORS
 
 - Origin yang terdaftar di `ALLOWED_ORIGINS` akan menerima header `Access-Control-Allow-Origin: <origin>` serta `Access-Control-Allow-Credentials: true`.
@@ -286,7 +350,7 @@ erDiagram
 | `class_schedules` | `ClassSchedule` | Jadwal kelas per sesi/seksi (`course_id`, `room_id`, `section`, `instructor`, `day_of_week`, `start_time`, `end_time`, `academic_term`). |
 | `students` | `Student` | Data induk mahasiswa (`student_id`, `name`, `department`, `photo_url`, serta `user_id` opsional). |
 | `student_schedules` | `StudentSchedule` | Tabel relasi pengambilan jadwal kelas oleh mahasiswa (`status`, `enrolled_at`). |
-| `attendance` | `Attendance` | Catatan kehadiran harian mahasiswa per ruangan/sesi (`student_id`, `room_id`, `class_schedule_id` opsional, `session_date`, `checked_in_at`). |
+| `attendance` | `Attendance` | Catatan kehadiran harian mahasiswa per ruangan/sesi (`student_id`, `room_id`, `class_schedule_id`, `session_date`, `checked_in_at`). |
 
 ---
 
@@ -300,7 +364,11 @@ go test -v ./...
 
 Cakupan pengujian saat ini meliputi:
 - **`config/cors_test.go`**: Pengujian parsing `ALLOWED_ORIGINS` (normalisasi spasi dan garis miring penutup) serta perilaku middleware CORS untuk origin yang diizinkan, header kredensial, dan penolakan *preflight* dari origin asing.
-- **`models/schema_test.go`**: Memastikan setiap nama kolom GORM pada seluruh 11 model sesuai dengan tag `json`-nya (termasuk *override* kolom eksplisit seperti `Credential.AAGUID` -> `aaguid` dan `WebAuthnUser.RpID` -> `rp_id`).
+- **`config/mds_test.go`**: Pemuatan metadata lokal FIDO Conformance (`fido-conformance-mds/`), dukungan algoritma COSE (`ES256K` / `RS1`), serta verifikasi blob JWT MDS3 dinamis.
+- **`controllers/attendance_test.go`**: Pengelompokan & pengurutan katalog ruangan demo, pemilihan sesi kelas aktif & perhitungan daftar hadir (*roster*), serta validasi & penanganan konflik *check-in* presensi.
+- **`controllers/conformance_test.go`**: Pengujian menyeluruh registrasi & *assertion* FIDO2 Conformance (`/attestation/*`, `/assertion/*`).
+- **`controllers/registration_test.go`**: Pengujian daftar direktori registrasi mahasiswa, penautan idempoten `students.user_id`, dan pembersihan akun/sesi yang belum selesai.
+- **`models/schema_test.go`**: Memastikan setiap nama kolom GORM pada seluruh 11 model sesuai dengan tag `json`-nya serta menyelaraskan *foreign key* UUID dan indeks unik komposit dengan skema PostgreSQL.
 
 ---
 

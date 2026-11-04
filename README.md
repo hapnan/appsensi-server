@@ -40,9 +40,13 @@ appsensi-server/
 │   ├── mds_test.go          # Unit tests for local MDS loading, MDS3 JWT/x5u/CRL & refresh
 │   └── webauthn.go          # go-webauthn Relying Party & Conformance initialization
 ├── controllers/
+│   ├── attendance.go        # Room catalog, live session roster & attendance check-in handlers
+│   ├── attendance_test.go   # Unit tests for attendance catalog, roster & check-in flows
 │   ├── auth.go              # Production WebAuthn registration/login handlers
 │   ├── conformance.go       # Standardized FIDO2 Conformance Server endpoints
-│   └── conformance_test.go  # End-to-end conformance ceremony & validation tests
+│   ├── conformance_test.go  # End-to-end conformance ceremony & validation tests
+│   ├── registration.go      # Student registration list, user linking & incomplete cleanup handlers
+│   └── registration_test.go # Unit tests for registration directory, linking & cleanup flows
 ├── database/
 │   └── db.go                # PostgreSQL GORM connection setup
 ├── fido-conformance-mds/    # FIDO Alliance conformance authenticator metadata JSON statements
@@ -159,6 +163,12 @@ sequenceDiagram
 | `POST` | `/register/finish` | Verifies attestation response and stores the passkey credential. |
 | `POST` | `/login/begin` | Generates WebAuthn assertion options for an existing registered user. |
 | `POST` | `/login/finish` | Verifies signed assertion and updates credential usage metadata. |
+| `GET` | `/attendance/demo-catalog` | Lists classrooms with scheduled courses and weekly sessions. |
+| `GET` | `/attendance/roster` | Returns the active class session and pending student roster for a room/date. |
+| `POST` | `/attendance/check-in` | Records verified student attendance for a room's active class session. |
+| `GET` | `/registration/list` | Lists all students paired with WebAuthn account & passkey status. |
+| `POST` | `/registration/link-student` | Links `students.user_id` to `users.id` (idempotent). |
+| `POST` | `/registration/cleanup-incomplete` | Deletes an incomplete `users` record that has zero passkey credentials. |
 
 ### Endpoint Details
 
@@ -183,7 +193,7 @@ Starts a WebAuthn registration session. Creates a `users` record (linked by `use
 - **Response (`200 OK`)**: Standard WebAuthn `CredentialCreation` JSON (`{ "publicKey": { ... } }`).
 
 #### `POST /register/finish`
-Completes passkey registration. Expects a single JSON object containing **`username` and `email` at the top level** merged with the browser's WebAuthn `PublicKeyCredential` attestation response.
+Completes passkey registration. Expects a single JSON object containing **`username` and `email` at the top level** merged with the browser's WebAuthn `PublicKeyCredential` attestation response, and automatically links `students.user_id` to `users.id` when unset.
 - **Request Body**:
   ```json
   {
@@ -241,6 +251,58 @@ Completes passkey authentication. Expects **`username` at the top level** merged
   }
   ```
 
+#### `GET /attendance/demo-catalog`
+Lists all campus classrooms that host scheduled courses along with their weekly class sessions, sorted by building, floor, and room number.
+- **Response (`200 OK`)**: `DemoCatalogRoom[]` (`code`, `floor`, `roomNumber`, `buildingCode`, `buildingName`, `facultyCode`, `facultyName`, `schedules`).
+
+#### `GET /attendance/roster`
+Returns the active class schedule and students enrolled in it who still need to check in on the target date.
+- **Query Parameters**:
+  - `room` *(required)*: Room code in `building.floor.room` format (e.g. `h.2.4`, case-insensitive).
+  - `scheduleId` *(optional)*: Explicit `class_schedules.id` UUID to select a specific session on that day.
+  - `date` *(optional)*: Calendar date in `YYYY-MM-DD` format (defaults to server today).
+- **Response (`200 OK`)**: `RosterResult` (`room`, `sessionDate`, `dayOfWeek`, `schedule`, `availableSchedules`, `total`, `present`, `pending`).
+- **Error (`400 Bad Request`)**: Returned if `room`, `scheduleId`, or `date` is malformed.
+
+#### `POST /attendance/check-in`
+Records a student's attendance in `attendance` for a room's active class schedule.
+- **Request Body**:
+  ```json
+  {
+    "room": "h.2.4",
+    "studentId": "STU-FCS-001",
+    "scheduleId": "<optional-uuid>",
+    "date": "2026-11-04"
+  }
+  ```
+- **Response (`200 OK`)**:
+  ```json
+  {
+    "id": "<student-uuid>",
+    "studentId": "STU-FCS-001",
+    "name": "Student Name",
+    "room": "h.2.4",
+    "sessionDate": "2026-11-04",
+    "checkedInAt": "2026-11-04T09:15:00Z"
+  }
+  ```
+- **Errors**: `400 Bad Request` (invalid input or student not enrolled), `404 Not Found` (room or student missing), `412 Precondition Failed` (no passkey registered or no class scheduled), `409 Conflict` (already checked in).
+
+#### `GET /registration/list`
+Lists all students ordered by `student_id` paired with any linked `users` account and passkey registration status (`isRegistered`).
+- **Response (`200 OK`)**: `RegistrationStudentRow[]` (`id`, `name`, `username`, `department`, `userId`, `email`, `createdAt`, `isRegistered`).
+
+#### `POST /registration/link-student`
+Idempotently links `students.user_id` to `users.id` for a registered username.
+- **Request Body**: `{ "studentId": "<student-uuid>", "username": "STU-FCS-001" }`
+- **Response (`200 OK`)**: `{ "userId": "<user-uuid>", "email": "student@example.edu", "createdAt": "..." }`
+- **Errors**: `400 Bad Request`, `404 Not Found`.
+
+#### `POST /registration/cleanup-incomplete`
+Deletes an unverified `users` record (one with zero passkey credentials) and clears any pending registration challenge if a WebAuthn ceremony is cancelled midway.
+- **Request Body**: `{ "username": "STU-FCS-001" }`
+- **Response (`200 OK`)**: `{ "cleaned": true }` (or `{ "cleaned": false }` if not found or credentials already exist).
+
 ### CORS Behavior
 
 - Configured origins in `ALLOWED_ORIGINS` receive `Access-Control-Allow-Origin: <origin>` and `Access-Control-Allow-Credentials: true`.
@@ -291,7 +353,7 @@ erDiagram
 | `class_schedules` | `ClassSchedule` | Scheduled course sections (`course_id`, `room_id`, `section`, `instructor`, `day_of_week`, `start_time`, `end_time`, `academic_term`). |
 | `students` | `Student` | Student directory (`student_id`, `name`, `department`, `photo_url`, optional `user_id`). |
 | `student_schedules` | `StudentSchedule` | Join table tracking student enrollments in `class_schedules` (`status`, `enrolled_at`). |
-| `attendance` | `Attendance` | Daily student room/session check-in logs (`student_id`, `room_id`, optional `class_schedule_id`, `session_date`, `checked_in_at`). |
+| `attendance` | `Attendance` | Daily student room/session check-in logs (`student_id`, `room_id`, `class_schedule_id`, `session_date`, `checked_in_at`). |
 
 ---
 
@@ -306,8 +368,10 @@ go test -v ./...
 Current test suites cover:
 - **`config/cors_test.go`**: `ALLOWED_ORIGINS` parsing (whitespace/trailing-slash normalization) and CORS middleware responses for allowed origins, credential headers, and disallowed preflight requests.
 - **`config/mds_test.go`**: Loading all 25 FIDO Conformance metadata JSON files (`fido-conformance-mds/`), COSE algorithm support (`ES256K` / `RS1`), zero-AAGUID U2F key-identifier verification, and dynamic MDS3 JWT blob verification (`x5c`, `x5u`, CRL revocation, poisoned blob isolation, and `nextUpdate` refreshes).
+- **`controllers/attendance_test.go`**: Classroom demo catalog grouping & sorting, active session selection & roster pending calculation, and full attendance check-in validation & conflict handling.
 - **`controllers/conformance_test.go`**: End-to-end FIDO2 Conformance registration and assertion ceremonies (`/attestation/*`, `/assertion/*`), strict input validation, `getClientExtensionResults` mapping, duplicate credential rejection, and `signCount` regression (`CloneWarning`) rejection.
-- **`models/schema_test.go`**: Verifies that every GORM model column name matches its `json` struct tag (including explicit column overrides such as `Credential.AAGUID` -> `aaguid` and `WebAuthnUser.RpID` -> `rp_id`).
+- **`controllers/registration_test.go`**: Student registration directory listing & credential deduplication, idempotent `students.user_id` linking, and incomplete user/session cleanup.
+- **`models/schema_test.go`**: Verifies that every GORM model column name matches its `json` struct tag and aligns UUID foreign keys and composite unique indexes with the PostgreSQL schema.
 
 ---
 
