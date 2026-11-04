@@ -1,9 +1,11 @@
 package database
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"gorm.io/gorm/schema"
 )
 
 type sampleModelV1 struct {
@@ -92,3 +94,49 @@ func TestResolvePoolLimitsAndEnvHelpers(t *testing.T) {
 		t.Fatal("did not expect 23505 PgError to be recognized as undefined_table")
 	}
 }
+
+func TestManagedModels_SharedSchemaCachePreservesColumnTypes(t *testing.T) {
+	namer := schema.NamingStrategy{IdentifierMaxLength: 63}
+	models := managedModels()
+
+	// Parse each model in an isolated cache first to capture its declared column types.
+	declaredTypes := make(map[string]map[string]schema.DataType, len(models))
+	for _, m := range models {
+		isolated, err := schema.Parse(m, &sync.Map{}, namer)
+		if err != nil {
+			t.Fatalf("isolated schema.Parse(%T): %v", m, err)
+		}
+		colMap := make(map[string]schema.DataType, len(isolated.Fields))
+		for _, f := range isolated.Fields {
+			if f.DBName != "" {
+				colMap[f.DBName] = f.DataType
+			}
+		}
+		declaredTypes[isolated.Table] = colMap
+	}
+
+	// Parse all models together into a single shared cache (exactly as db.AutoMigrate does)
+	// and verify no foreign-key relationship guess mutates a column's DataType.
+	sharedCache := &sync.Map{}
+	parsed := make([]*schema.Schema, 0, len(models))
+	for _, m := range models {
+		s, err := schema.Parse(m, sharedCache, namer)
+		if err != nil {
+			t.Fatalf("shared schema.Parse(%T): %v", m, err)
+		}
+		parsed = append(parsed, s)
+	}
+
+	for _, s := range parsed {
+		for _, f := range s.Fields {
+			if f.DBName == "" {
+				continue
+			}
+			want := declaredTypes[s.Table][f.DBName]
+			if f.DataType != want {
+				t.Errorf("shared schema cache mutated %s.%s DataType from %q to %q", s.Table, f.DBName, want, f.DataType)
+			}
+		}
+	}
+}
+

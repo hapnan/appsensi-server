@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 	"gorm.io/gorm/schema"
 )
 
@@ -175,7 +176,12 @@ func readStoredSchemaFingerprint(db *gorm.DB) (string, error) {
 		Fingerprint string `gorm:"column:fingerprint"`
 	}
 	var row metaRow
-	res := db.Raw(`SELECT fingerprint FROM app_schema_meta WHERE id = 1`).Scan(&row)
+	// Silence GORM logger on the metadata probe so first-run 42P01 (table not created yet)
+	// does not emit a misleading ERROR log line; unexpected DB errors are still returned.
+	silentDB := db.Session(&gorm.Session{
+		Logger: db.Logger.LogMode(logger.Silent),
+	})
+	res := silentDB.Raw(`SELECT fingerprint FROM app_schema_meta WHERE id = 1`).Scan(&row)
 	if res.Error != nil {
 		if isUndefinedTableError(res.Error) {
 			return "", nil
@@ -204,7 +210,13 @@ func migrateIfSchemaChanged(db *gorm.DB) error {
 
 	log.Printf("Database schema change detected (fingerprint=%s), running AutoMigrate and index updates...", shortHash)
 
-	if err := db.Exec(`CREATE TABLE IF NOT EXISTS app_schema_meta (
+	// Use error-level logging during one-time startup DDL so remote cloud DDL latency
+	// does not trigger false-positive 200ms slow-query warnings while still surfacing errors.
+	migDB := db.Session(&gorm.Session{
+		Logger: db.Logger.LogMode(logger.Error),
+	})
+
+	if err := migDB.Exec(`CREATE TABLE IF NOT EXISTS app_schema_meta (
 		id INTEGER PRIMARY KEY CHECK (id = 1),
 		fingerprint TEXT NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -212,21 +224,21 @@ func migrateIfSchemaChanged(db *gorm.DB) error {
 		return fmt.Errorf("create app_schema_meta table: %w", err)
 	}
 
-	if err := db.AutoMigrate(managedModels()...); err != nil {
+	if err := migDB.AutoMigrate(managedModels()...); err != nil {
 		return fmt.Errorf("gorm auto-migrate: %w", err)
 	}
 
 	for _, stmt := range supplementaryIndexStatements {
-		if err := db.Exec(stmt).Error; err != nil {
+		if err := migDB.Exec(stmt).Error; err != nil {
 			return fmt.Errorf("create supplementary index (%s): %w", stmt, err)
 		}
 	}
 
-	if err := db.Exec(analyzeTablesStatement).Error; err != nil {
+	if err := migDB.Exec(analyzeTablesStatement).Error; err != nil {
 		log.Printf("Warning: ANALYZE after migration returned error: %v", err)
 	}
 
-	if err := db.Exec(`INSERT INTO app_schema_meta (id, fingerprint, updated_at)
+	if err := migDB.Exec(`INSERT INTO app_schema_meta (id, fingerprint, updated_at)
 		VALUES (1, ?, now())
 		ON CONFLICT (id) DO UPDATE
 		SET fingerprint = EXCLUDED.fingerprint, updated_at = now()`, fingerprint).Error; err != nil {
