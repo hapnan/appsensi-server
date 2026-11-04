@@ -19,11 +19,11 @@ import (
 
 // RegistrationStudentRow represents a student paired with any matching WebAuthn user account.
 type RegistrationStudentRow struct {
-	ID           string     `json:"id"`
+	ID           uuid.UUID  `json:"id"`
 	Name         string     `json:"name"`
 	Username     string     `json:"username"`
 	Department   *string    `json:"department"`
-	UserID       *string    `json:"userId"`
+	UserID       *uuid.UUID `json:"userId"`
 	Email        *string    `json:"email"`
 	CreatedAt    *time.Time `json:"createdAt"`
 	IsRegistered bool       `json:"isRegistered"`
@@ -37,7 +37,7 @@ type LinkStudentUserRequest struct {
 
 // LinkStudentUserResponse represents the JSON payload returned after linking a student to a user.
 type LinkStudentUserResponse struct {
-	UserID    string    `json:"userId"`
+	UserID    uuid.UUID `json:"userId"`
 	Email     string    `json:"email"`
 	CreatedAt time.Time `json:"createdAt"`
 }
@@ -75,6 +75,8 @@ type RegistrationStore interface {
 }
 
 type gormRegistrationStore struct{}
+
+var _ RegistrationStore = gormRegistrationStore{}
 
 func (gormRegistrationStore) ListStudentsWithRegistration() ([]registrationJoinRow, error) {
 	var rows []registrationJoinRow
@@ -176,7 +178,7 @@ func ListRegistrationStudents(c *gin.Context) {
 	rows, err := store.ListStudentsWithRegistration()
 	if err != nil {
 		log.Printf("ListRegistrationStudents error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to load registration list")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to load registration list")
 		return
 	}
 
@@ -185,18 +187,13 @@ func ListRegistrationStudents(c *gin.Context) {
 
 	for _, row := range rows {
 		isRegistered := row.UserID != nil && row.CredentialID != nil
-		var userIDStr *string
-		if row.UserID != nil {
-			s := row.UserID.String()
-			userIDStr = &s
-		}
 
 		entry := RegistrationStudentRow{
-			ID:           row.ID.String(),
+			ID:           row.ID,
 			Name:         row.Name,
 			Username:     row.Username,
 			Department:   row.Department,
-			UserID:       userIDStr,
+			UserID:       row.UserID,
 			Email:        row.Email,
 			CreatedAt:    row.CreatedAt,
 			IsRegistered: isRegistered,
@@ -223,40 +220,40 @@ func LinkStudentUser(c *gin.Context) {
 
 	var req LinkStudentUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		respondAPIError(c, http.StatusBadRequest, "BAD_REQUEST", "Invalid JSON request body")
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "Invalid JSON request body")
 		return
 	}
 
 	studentUUID, err := uuid.Parse(strings.TrimSpace(req.StudentID))
 	if err != nil {
-		respondAPIError(c, http.StatusBadRequest, "BAD_REQUEST", "Invalid studentId UUID")
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "Invalid studentId UUID")
 		return
 	}
 
 	if len(req.Username) == 0 {
-		respondAPIError(c, http.StatusBadRequest, "BAD_REQUEST", "username is required")
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "username is required")
 		return
 	}
 
 	user, err := store.FindUserByUsername(req.Username)
 	if err != nil {
 		log.Printf("LinkStudentUser FindUserByUsername error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to look up user")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to look up user")
 		return
 	}
 	if user == nil {
-		respondAPIError(c, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("Registered user %q was not found.", req.Username))
+		respondAPIError(c, http.StatusNotFound, ErrCodeNotFound, fmt.Sprintf("Registered user %q was not found.", req.Username))
 		return
 	}
 
 	if err := store.UpdateStudentUserID(studentUUID, user.ID); err != nil {
 		log.Printf("LinkStudentUser UpdateStudentUserID error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to link student user")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to link student user")
 		return
 	}
 
 	c.JSON(http.StatusOK, LinkStudentUserResponse{
-		UserID:    user.ID.String(),
+		UserID:    user.ID,
 		Email:     user.Email,
 		CreatedAt: user.CreatedAt,
 	})
@@ -269,19 +266,19 @@ func CleanupIncompleteUser(c *gin.Context) {
 
 	var req CleanupIncompleteUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		respondAPIError(c, http.StatusBadRequest, "BAD_REQUEST", "Invalid JSON request body")
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "Invalid JSON request body")
 		return
 	}
 
 	if len(req.Username) == 0 {
-		respondAPIError(c, http.StatusBadRequest, "BAD_REQUEST", "username is required")
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "username is required")
 		return
 	}
 
 	user, err := store.FindUserByUsername(req.Username)
 	if err != nil {
 		log.Printf("CleanupIncompleteUser FindUserByUsername error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to look up user")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to look up user")
 		return
 	}
 	if user == nil {
@@ -292,7 +289,7 @@ func CleanupIncompleteUser(c *gin.Context) {
 	hasCreds, err := store.UserHasCredentials(user.ID)
 	if err != nil {
 		log.Printf("CleanupIncompleteUser UserHasCredentials error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to check user credentials")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to check user credentials")
 		return
 	}
 	if hasCreds {
@@ -304,7 +301,7 @@ func CleanupIncompleteUser(c *gin.Context) {
 
 	if err := store.DeleteUser(user.ID); err != nil {
 		log.Printf("CleanupIncompleteUser DeleteUser error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to delete incomplete user")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to delete incomplete user")
 		return
 	}
 
