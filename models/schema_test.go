@@ -137,6 +137,35 @@ func TestStudentAndAttendanceSchemaAlignment(t *testing.T) {
 		t.Fatalf("failed to parse Credential schema: %v", err)
 	}
 	assertSchemaIndexColumns(t, credSchema, "credentials_user_credential_idx", []string{"user_id", "credential_id"})
+
+	// Regression check: parsing StudentSchedule and Attendance in the same shared cache
+	// must NOT treat Student as HasOne or overwrite Student.StudentID ("text" badge code) to "uuid".
+	stuSchema, err := schema.Parse(&Student{}, cache, namer)
+	if err != nil {
+		t.Fatalf("failed to parse Student schema: %v", err)
+	}
+	stuBadgeField := stuSchema.LookUpField("StudentID")
+	if stuBadgeField == nil {
+		t.Fatal("Student.StudentID field not found")
+	}
+	if string(stuBadgeField.DataType) != "text" {
+		t.Fatalf("Student.StudentID DataType = %q after parsing relations, want 'text'", stuBadgeField.DataType)
+	}
+
+	for name, rel := range map[string]*schema.Relationship{
+		"StudentSchedule.Student": ssSchema.Relationships.Relations["Student"],
+		"Attendance.Student":      attSchema.Relationships.Relations["Student"],
+	} {
+		if rel == nil {
+			t.Fatalf("%s relationship not found", name)
+		}
+		if rel.Type != schema.BelongsTo {
+			t.Fatalf("%s relationship Type = %q, want %q", name, rel.Type, schema.BelongsTo)
+		}
+		if len(rel.References) != 1 || rel.References[0].PrimaryKey.DBName != "id" || rel.References[0].ForeignKey.DBName != "student_id" {
+			t.Fatalf("%s invalid reference mapping: %+v", name, rel.References)
+		}
+	}
 }
 
 func assertSchemaIndexColumns(t *testing.T, s *schema.Schema, idxName string, wantCols []string) {

@@ -14,7 +14,7 @@ type Student struct {
 	Department *string    `gorm:"type:text" json:"department"`
 	PhotoURL   *string    `gorm:"type:text;column:photo_url" json:"photo_url"`
 	UserID     *uuid.UUID `gorm:"type:uuid;index:students_user_idx" json:"user_id"`
-	User       *User      `gorm:"foreignKey:UserID;constraint:OnDelete:SET NULL" json:"-"`
+	User       *User      `gorm:"belongsTo;foreignKey:UserID;references:ID;constraint:OnDelete:SET NULL" json:"-"`
 	CreatedAt  time.Time  `gorm:"type:timestamptz;not null;default:now()" json:"created_at"`
 }
 
@@ -31,9 +31,9 @@ const (
 type StudentSchedule struct {
 	ID              uuid.UUID        `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
 	StudentID       uuid.UUID        `gorm:"type:uuid;not null;uniqueIndex:student_schedule_unique_idx,priority:1;index:student_schedules_student_idx" json:"student_id"`
-	Student         Student          `gorm:"foreignKey:StudentID;constraint:OnDelete:CASCADE" json:"-"`
+	Student         Student          `gorm:"belongsTo;foreignKey:StudentID;references:ID;constraint:OnDelete:CASCADE" json:"-"`
 	ClassScheduleID uuid.UUID        `gorm:"type:uuid;not null;uniqueIndex:student_schedule_unique_idx,priority:2;index:student_schedules_class_idx;index:student_schedules_class_status_idx,priority:1" json:"class_schedule_id"`
-	ClassSchedule   ClassSchedule    `gorm:"foreignKey:ClassScheduleID;constraint:OnDelete:CASCADE" json:"-"`
+	ClassSchedule   ClassSchedule    `gorm:"belongsTo;foreignKey:ClassScheduleID;references:ID;constraint:OnDelete:CASCADE" json:"-"`
 	Status          EnrollmentStatus `gorm:"type:text;not null;default:'enrolled';index:student_schedules_class_status_idx,priority:2" json:"status"`
 	EnrolledAt      time.Time        `gorm:"type:timestamptz;not null;default:now()" json:"enrolled_at"`
 }
@@ -44,11 +44,11 @@ func (StudentSchedule) TableName() string { return "student_schedules" }
 type Attendance struct {
 	ID              uuid.UUID     `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
 	StudentID       uuid.UUID     `gorm:"type:uuid;not null;uniqueIndex:attendance_student_room_day_idx,priority:1" json:"student_id"`
-	Student         Student       `gorm:"foreignKey:StudentID;constraint:OnDelete:CASCADE" json:"-"`
+	Student         Student       `gorm:"belongsTo;foreignKey:StudentID;references:ID;constraint:OnDelete:CASCADE" json:"-"`
 	RoomID          uuid.UUID     `gorm:"type:uuid;not null;index:attendance_room_day_idx,priority:1" json:"room_id"`
-	Room            Room          `gorm:"foreignKey:RoomID;constraint:OnDelete:CASCADE" json:"-"`
+	Room            Room          `gorm:"belongsTo;foreignKey:RoomID;references:ID;constraint:OnDelete:CASCADE" json:"-"`
 	ClassScheduleID uuid.UUID     `gorm:"type:uuid;not null;uniqueIndex:attendance_student_room_day_idx,priority:2;index:attendance_class_schedule_idx;index:attendance_schedule_date_idx,priority:1" json:"class_schedule_id"`
-	ClassSchedule   ClassSchedule `gorm:"foreignKey:ClassScheduleID;constraint:OnDelete:CASCADE" json:"-"`
+	ClassSchedule   ClassSchedule `gorm:"belongsTo;foreignKey:ClassScheduleID;references:ID;constraint:OnDelete:CASCADE" json:"-"`
 	SessionDate     time.Time     `gorm:"type:date;not null;uniqueIndex:attendance_student_room_day_idx,priority:3;index:attendance_room_day_idx,priority:2;index:attendance_schedule_date_idx,priority:2" json:"session_date"`
 	CheckedInAt     time.Time     `gorm:"type:timestamptz;not null;default:now()" json:"checked_in_at"`
 }
