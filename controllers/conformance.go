@@ -44,6 +44,8 @@ type ConformanceStore interface {
 
 type gormConformanceStore struct{}
 
+var _ ConformanceStore = gormConformanceStore{}
+
 func (gormConformanceStore) GetOrCreateUser(username, displayName, rpid string) (*models.User, error) {
 	var user models.User
 	err := database.DB.
@@ -145,12 +147,13 @@ func (gormConformanceStore) SaveCredential(cred *models.Credential) error {
 func (gormConformanceStore) UpdateCredentialOnLogin(credentialID []byte, signCount int64, cloneWarning, verified, backupState bool, lastUsedAt time.Time) error {
 	return database.DB.Model(&models.Credential{}).
 		Where("credential_id = ?", credentialID).
-		Updates(map[string]any{
-			"sign_count":    signCount,
-			"clone_warning": cloneWarning,
-			"verified":      verified,
-			"backup_state":  backupState,
-			"last_used_at":  &lastUsedAt,
+		Select("SignCount", "CloneWarning", "Verified", "BackupState", "LastUsedAt").
+		Updates(models.Credential{
+			SignCount:    signCount,
+			CloneWarning: cloneWarning,
+			Verified:     verified,
+			BackupState:  backupState,
+			LastUsedAt:   &lastUsedAt,
 		}).Error
 }
 
@@ -259,11 +262,31 @@ func deleteConformanceSession(sessID string) {
 	delete(conformanceSessions, sessID)
 }
 
+// ConformanceStatusResponse represents the standard FIDO2 Conformance Server status envelope.
+type ConformanceStatusResponse struct {
+	Status       string `json:"status"`
+	ErrorMessage string `json:"errorMessage"`
+}
+
+// ConformanceCreationOptionsResponse embeds WebAuthn creation options with FIDO2 conformance status fields.
+type ConformanceCreationOptionsResponse struct {
+	protocol.PublicKeyCredentialCreationOptions
+	Status       string `json:"status"`
+	ErrorMessage string `json:"errorMessage"`
+}
+
+// ConformanceAssertionOptionsResponse embeds WebAuthn assertion options with FIDO2 conformance status fields.
+type ConformanceAssertionOptionsResponse struct {
+	protocol.PublicKeyCredentialRequestOptions
+	Status       string `json:"status"`
+	ErrorMessage string `json:"errorMessage"`
+}
+
 func conformanceFail(c *gin.Context, msg string) {
 	log.Printf("Conformance failure [%s]: %s", c.Request.URL.Path, msg)
-	c.JSON(http.StatusBadRequest, gin.H{
-		"status":       "failed",
-		"errorMessage": msg,
+	c.JSON(http.StatusBadRequest, ConformanceStatusResponse{
+		Status:       "failed",
+		ErrorMessage: msg,
 	})
 }
 
@@ -341,20 +364,6 @@ func normalizeResultExtensions(m map[string]any) error {
 		}
 	}
 	return nil
-}
-
-func flattenOptionsWithStatus(options any) (map[string]any, error) {
-	raw, err := json.Marshal(options)
-	if err != nil {
-		return nil, err
-	}
-	var out map[string]any
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, err
-	}
-	out["status"] = "ok"
-	out["errorMessage"] = ""
-	return out, nil
 }
 
 // ConformanceAttestationOptions handles POST /attestation/options per FIDO2 Server Conformance API.
@@ -528,14 +537,12 @@ func ConformanceAttestationOptions(c *gin.Context) {
 		return
 	}
 
-	respBody, err := flattenOptionsWithStatus(creation.Response)
-	if err != nil {
-		conformanceFail(c, "failed to encode registration options")
-		return
-	}
-
 	c.SetCookie(conformanceSessionCookie, sessID, int(conformanceSessionTTL.Seconds()), "/", "", false, true)
-	c.JSON(http.StatusOK, respBody)
+	c.JSON(http.StatusOK, ConformanceCreationOptionsResponse{
+		PublicKeyCredentialCreationOptions: creation.Response,
+		Status:                             "ok",
+		ErrorMessage:                       "",
+	})
 }
 
 // ConformanceAttestationResult handles POST /attestation/result per FIDO2 Server Conformance API.
@@ -653,20 +660,6 @@ func ConformanceAttestationResult(c *gin.Context) {
 		return
 	}
 
-	var flags uint32
-	if cred.Flags.UserPresent {
-		flags |= 1
-	}
-	if cred.Flags.UserVerified {
-		flags |= 2
-	}
-	if cred.Flags.BackupEligible {
-		flags |= 4
-	}
-	if cred.Flags.BackupState {
-		flags |= 8
-	}
-
 	transports := make([]string, len(cred.Transport))
 	for i, t := range cred.Transport {
 		transports[i] = string(t)
@@ -689,8 +682,8 @@ func ConformanceAttestationResult(c *gin.Context) {
 		AttestationFormat: attFormat,
 		Attestation:       cred.Attestation.Object,
 		Transport:         strings.Join(transports, ","),
-		Flags:             []byte{byte(flags)},
-		Attachment:        string(cred.Authenticator.Attachment),
+		Flags:             models.EncodeCredentialFlags(cred.Flags),
+		Attachment:        cred.Authenticator.Attachment,
 		SignCount:         int64(cred.Authenticator.SignCount),
 		CloneWarning:      cred.Authenticator.CloneWarning,
 		AAGUID:            aaguid,
@@ -706,9 +699,9 @@ func ConformanceAttestationResult(c *gin.Context) {
 	}
 
 	deleteConformanceSession(sess.ID)
-	c.JSON(http.StatusOK, gin.H{
-		"status":       "ok",
-		"errorMessage": "",
+	c.JSON(http.StatusOK, ConformanceStatusResponse{
+		Status:       "ok",
+		ErrorMessage: "",
 	})
 }
 
@@ -785,14 +778,12 @@ func ConformanceAssertionOptions(c *gin.Context) {
 		return
 	}
 
-	respBody, err := flattenOptionsWithStatus(assertion.Response)
-	if err != nil {
-		conformanceFail(c, "failed to encode assertion options")
-		return
-	}
-
 	c.SetCookie(conformanceSessionCookie, sessID, int(conformanceSessionTTL.Seconds()), "/", "", false, true)
-	c.JSON(http.StatusOK, respBody)
+	c.JSON(http.StatusOK, ConformanceAssertionOptionsResponse{
+		PublicKeyCredentialRequestOptions: assertion.Response,
+		Status:                            "ok",
+		ErrorMessage:                      "",
+	})
 }
 
 // ConformanceAssertionResult handles POST /assertion/result per FIDO2 Server Conformance API.
@@ -910,8 +901,8 @@ func ConformanceAssertionResult(c *gin.Context) {
 	}
 
 	deleteConformanceSession(sess.ID)
-	c.JSON(http.StatusOK, gin.H{
-		"status":       "ok",
-		"errorMessage": "",
+	c.JSON(http.StatusOK, ConformanceStatusResponse{
+		Status:       "ok",
+		ErrorMessage: "",
 	})
 }
