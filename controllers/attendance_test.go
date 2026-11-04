@@ -43,8 +43,8 @@ func newMemoryAttendanceStore() *memoryAttendanceStore {
 	}
 }
 
-func attKey(studentID, scheduleID uuid.UUID, sessionDate time.Time) string {
-	return studentID.String() + ":" + scheduleID.String() + ":" + sessionDate.Format("2006-01-02")
+func attKey(studentID, scheduleID uuid.UUID, sessionDate SessionDate) string {
+	return studentID.String() + ":" + scheduleID.String() + ":" + sessionDate.String()
 }
 
 func (m *memoryAttendanceStore) ListDemoCatalogRows() ([]demoCatalogRow, error) {
@@ -53,10 +53,10 @@ func (m *memoryAttendanceStore) ListDemoCatalogRows() ([]demoCatalogRow, error) 
 	return slices.Clone(m.catalogRows), nil
 }
 
-func (m *memoryAttendanceStore) FindRoomByCode(code string) (*models.Room, error) {
+func (m *memoryAttendanceStore) FindRoomByCode(code RoomCode) (*models.Room, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	r, ok := m.roomsByCode[code]
+	r, ok := m.roomsByCode[code.String()]
 	if !ok {
 		return nil, nil
 	}
@@ -82,11 +82,11 @@ func (m *memoryAttendanceStore) ListEnrolledStudentsForSchedule(scheduleID uuid.
 	return slices.Clone(m.enrolledBySchedule[scheduleID]), nil
 }
 
-func (m *memoryAttendanceStore) ListCheckedInStudentIDs(scheduleID uuid.UUID, sessionDate time.Time) ([]uuid.UUID, error) {
+func (m *memoryAttendanceStore) ListCheckedInStudentIDs(scheduleID uuid.UUID, sessionDate SessionDate) ([]uuid.UUID, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var ids []uuid.UUID
-	suffix := ":" + scheduleID.String() + ":" + sessionDate.Format("2006-01-02")
+	suffix := ":" + scheduleID.String() + ":" + sessionDate.String()
 	for k := range m.attendanceKeys {
 		if strings.HasSuffix(k, suffix) {
 			parts := strings.SplitN(k, ":", 2)
@@ -148,14 +148,14 @@ func (m *memoryAttendanceStore) IsStudentEnrolled(studentUUID, scheduleID uuid.U
 	return m.enrollments[studentUUID.String()+":"+scheduleID.String()], nil
 }
 
-func (m *memoryAttendanceStore) HasAttendance(studentUUID, scheduleID uuid.UUID, sessionDate time.Time) (bool, error) {
+func (m *memoryAttendanceStore) HasAttendance(studentUUID, scheduleID uuid.UUID, sessionDate SessionDate) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, ok := m.attendanceKeys[attKey(studentUUID, scheduleID, sessionDate)]
 	return ok, nil
 }
 
-func (m *memoryAttendanceStore) InsertAttendance(studentUUID, roomID, scheduleID uuid.UUID, sessionDate time.Time) (time.Time, bool, error) {
+func (m *memoryAttendanceStore) InsertAttendance(studentUUID, roomID, scheduleID uuid.UUID, sessionDate SessionDate) (time.Time, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.forceInsertConflict {
@@ -314,7 +314,7 @@ func TestGetDemoCatalog_GroupingSortingAndNullFallbacks(t *testing.T) {
 	}
 
 	// Schedule sort on h.2.4: Mon 9:00 -> Mon 10:00 -> Fri 08:00
-	wantOrder := []string{schedMonEarly.String(), schedMonLate.String(), schedFri.String()}
+	wantOrder := []uuid.UUID{schedMonEarly, schedMonLate, schedFri}
 	if len(got[0].Schedules) != 3 {
 		t.Fatalf("len(h.2.4 schedules) = %d, want 3", len(got[0].Schedules))
 	}
@@ -403,7 +403,10 @@ func TestGetRoster_SelectionDeduplicationAndPending(t *testing.T) {
 		{ID: stuCitra, StudentID: "STU-003", Name: "Citra", UserID: &userAlice, Username: strPtr("STU-003"), CredentialID: &cred1},
 	}
 
-	wedToday := time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC)
+	wedToday, err := ParseSessionDate("2026-11-04")
+	if err != nil {
+		t.Fatalf("ParseSessionDate: %v", err)
+	}
 	store.attendanceKeys[attKey(stuCitra, schedMidday, wedToday)] = time.Now()
 
 	// Clock is Wednesday 2026-11-04 10:15 local -> 08:00-10:00 ended, so 10:30-12:30 is auto-selected!
@@ -425,10 +428,10 @@ func TestGetRoster_SelectionDeduplicationAndPending(t *testing.T) {
 	if roster.Room != "h.2.4" {
 		t.Errorf("room = %q, want 'h.2.4'", roster.Room)
 	}
-	if roster.Schedule == nil || roster.Schedule.ID != schedMidday.String() {
+	if roster.Schedule == nil || roster.Schedule.ID != schedMidday {
 		t.Fatalf("active schedule = %+v, want %s", roster.Schedule, schedMidday)
 	}
-	if len(roster.AvailableSchedules) != 2 || roster.AvailableSchedules[0].ID != schedMorning.String() {
+	if len(roster.AvailableSchedules) != 2 || roster.AvailableSchedules[0].ID != schedMorning {
 		t.Fatalf("availableSchedules not sorted chronologically: %+v", roster.AvailableSchedules)
 	}
 	if roster.Total != 3 || roster.Present != 1 || len(roster.Pending) != 2 {
@@ -449,7 +452,7 @@ func TestGetRoster_SelectionDeduplicationAndPending(t *testing.T) {
 	if err := json.Unmarshal(w2.Body.Bytes(), &rosterOtherDay); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if rosterOtherDay.Schedule == nil || rosterOtherDay.Schedule.ID != schedMorning.String() {
+	if rosterOtherDay.Schedule == nil || rosterOtherDay.Schedule.ID != schedMorning {
 		t.Fatalf("other day schedule = %+v, want morning %s", rosterOtherDay.Schedule, schedMorning)
 	}
 	if rosterOtherDay.Schedule.Section != "A" || rosterOtherDay.Schedule.Instructor != "TBA" {
@@ -464,7 +467,7 @@ func TestGetRoster_SelectionDeduplicationAndPending(t *testing.T) {
 	if err := json.Unmarshal(w3.Body.Bytes(), &rosterExplicit); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if rosterExplicit.Schedule == nil || rosterExplicit.Schedule.ID != schedMorning.String() {
+	if rosterExplicit.Schedule == nil || rosterExplicit.Schedule.ID != schedMorning {
 		t.Fatalf("explicit schedule = %+v, want %s", rosterExplicit.Schedule, schedMorning)
 	}
 
@@ -628,8 +631,11 @@ func TestCheckIn_EndToEndAndErrorPaths(t *testing.T) {
 	if err := json.Unmarshal(wOK.Body.Bytes(), &okRes); err != nil {
 		t.Fatalf("unmarshal CheckInResponse: %v", err)
 	}
-	if okRes.ID != stuAndiID.String() || okRes.StudentID != "STU-FCS-001" || okRes.Room != "h.2.4" || okRes.SessionDate != "2026-11-04" {
+	if okRes.ID != stuAndiID || okRes.StudentID != "STU-FCS-001" || okRes.Room != "h.2.4" || okRes.SessionDate != "2026-11-04" {
 		t.Errorf("unexpected CheckInResponse: %+v", okRes)
+	}
+	if !strings.Contains(wOK.Body.String(), `"id":"`+stuAndiID.String()+`"`) {
+		t.Errorf("expected hyphenated string UUID in wire JSON, got %s", wOK.Body.String())
 	}
 	if stuAndi.UserID == nil || *stuAndi.UserID != userAndiID {
 		t.Errorf("expected stuAndi.UserID to be backfilled to %s, got %v", userAndiID, stuAndi.UserID)

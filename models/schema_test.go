@@ -1,10 +1,12 @@
 package models
 
 import (
+	"math"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"gorm.io/gorm/schema"
 )
 
@@ -119,5 +121,27 @@ func TestStudentAndAttendanceSchemaAlignment(t *testing.T) {
 		if uniqueIdx.Fields[i].DBName != want {
 			t.Errorf("attendance_student_room_day_idx field[%d] = %q, want %q", i, uniqueIdx.Fields[i].DBName, want)
 		}
+	}
+}
+
+func TestSafeUint32SignCountAndCredentialFlags(t *testing.T) {
+	if got := safeUint32SignCount(-42); got != 0 {
+		t.Fatalf("safeUint32SignCount(-42) = %d, want 0", got)
+	}
+	if got := safeUint32SignCount(128); got != 128 {
+		t.Fatalf("safeUint32SignCount(128) = %d, want 128", got)
+	}
+	if got := safeUint32SignCount(int64(math.MaxUint32) + 999); got != math.MaxUint32 {
+		t.Fatalf("safeUint32SignCount(overflow) = %d, want %d", got, uint32(math.MaxUint32))
+	}
+
+	flags := EncodeCredentialFlags(webauthn.CredentialFlags{
+		UserPresent:    true,
+		UserVerified:   true,
+		BackupEligible: false,
+		BackupState:    true,
+	})
+	if len(flags) != 1 || flags[0] != (1|2|8) {
+		t.Fatalf("EncodeCredentialFlags = %v, want [11]", flags)
 	}
 }

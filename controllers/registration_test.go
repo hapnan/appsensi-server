@@ -149,7 +149,7 @@ func TestListRegistrationStudents(t *testing.T) {
 	if got[0].Username != "STU-001" || got[0].IsRegistered || got[0].UserID != nil {
 		t.Errorf("row[0] = %+v", got[0])
 	}
-	if got[1].Username != "STU-002" || got[1].IsRegistered || got[1].UserID == nil || *got[1].UserID != user2.String() {
+	if got[1].Username != "STU-002" || got[1].IsRegistered || got[1].UserID == nil || *got[1].UserID != user2 {
 		t.Errorf("row[1] = %+v", got[1])
 	}
 	if got[2].Username != "STU-003" || !got[2].IsRegistered || got[2].Email == nil || *got[2].Email != "stu3@campus.edu" {
@@ -210,7 +210,7 @@ func TestLinkStudentUserAndAutoLinkHelper(t *testing.T) {
 	if err := json.Unmarshal(wOK.Body.Bytes(), &linkRes); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if linkRes.UserID != userID.String() || linkRes.Email != "andi@campus.edu" {
+	if linkRes.UserID != userID || linkRes.Email != "andi@campus.edu" {
 		t.Errorf("unexpected LinkStudentUserResponse: %+v", linkRes)
 	}
 }
