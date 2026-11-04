@@ -48,11 +48,7 @@ var _ ConformanceStore = gormConformanceStore{}
 
 func (gormConformanceStore) GetOrCreateUser(username, displayName, rpid string) (*models.User, error) {
 	var user models.User
-	err := database.DB.
-		Preload("WebAuthnUser", "rp_id = ?", rpid).
-		Preload("Credentials").
-		Where("username = ?", username).
-		First(&user).Error
+	err := queryUserWithOptionalWebAuthn(database.DB, username, rpid).Take(&user).Error
 
 	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -99,11 +95,7 @@ func (gormConformanceStore) GetOrCreateUser(username, displayName, rpid string) 
 
 func (gormConformanceStore) GetExistingUser(username, rpid string) (*models.User, error) {
 	var user models.User
-	err := database.DB.
-		Preload("WebAuthnUser", "rp_id = ?", rpid).
-		Preload("Credentials").
-		Where("username = ?", username).
-		First(&user).Error
+	err := queryUserForLogin(database.DB, username, rpid).Take(&user).Error
 	if err != nil {
 		return nil, err
 	}
@@ -119,10 +111,10 @@ func (gormConformanceStore) GetExistingUser(username, rpid string) (*models.User
 func (gormConformanceStore) GetUserByID(userID uuid.UUID, rpid string) (*models.User, error) {
 	var user models.User
 	err := database.DB.
-		Preload("WebAuthnUser", "rp_id = ?", rpid).
-		Preload("Credentials").
-		Where("id = ?", userID).
-		First(&user).Error
+		InnerJoins("WebAuthnUser", database.DB.Where(&models.WebAuthnUser{RpID: rpid}, "RpID")).
+		Preload("Credentials", omitUnusedCredentialBlobs).
+		Where("users.id = ?", userID).
+		Take(&user).Error
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +126,7 @@ func (gormConformanceStore) GetUserByID(userID uuid.UUID, rpid string) (*models.
 
 func (gormConformanceStore) CredentialExists(credentialID []byte) (bool, error) {
 	var count int64
-	if err := database.DB.Model(&models.Credential{}).Where("credential_id = ?", credentialID).Count(&count).Error; err != nil {
+	if err := database.DB.Model(&models.Credential{}).Where("credential_id = ?", credentialID).Limit(1).Count(&count).Error; err != nil {
 		return false, err
 	}
 	return count > 0, nil
