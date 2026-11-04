@@ -24,8 +24,6 @@ import (
 )
 
 var (
-	roomCodeRegex            = regexp.MustCompile(`^[a-z]+\.\d+\.\d+$`)
-	sessionDateRegex         = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 	singleDigitHourTimeRegex = regexp.MustCompile(`^\d:\d{2}$`)
 
 	dayOrder = map[string]int{
@@ -41,43 +39,43 @@ var (
 
 // EnrolledStudent represents a student enrolled in an active class session awaiting check-in.
 type EnrolledStudent struct {
-	ID           string  `json:"id"`
-	StudentID    string  `json:"studentId"`
-	Username     string  `json:"username"`
-	Name         string  `json:"name"`
-	Department   *string `json:"department"`
-	PhotoURL     *string `json:"photoUrl"`
-	IsRegistered bool    `json:"isRegistered"`
+	ID           uuid.UUID `json:"id"`
+	StudentID    string    `json:"studentId"`
+	Username     string    `json:"username"`
+	Name         string    `json:"name"`
+	Department   *string   `json:"department"`
+	PhotoURL     *string   `json:"photoUrl"`
+	IsRegistered bool      `json:"isRegistered"`
 }
 
 // ScheduleSummary represents a condensed class schedule slot.
 type ScheduleSummary struct {
-	ID         string `json:"id"`
-	CourseCode string `json:"courseCode"`
-	CourseName string `json:"courseName"`
-	Section    string `json:"section"`
-	DayOfWeek  string `json:"dayOfWeek"`
-	StartTime  string `json:"startTime"`
-	EndTime    string `json:"endTime"`
+	ID         uuid.UUID `json:"id"`
+	CourseCode string    `json:"courseCode"`
+	CourseName string    `json:"courseName"`
+	Section    string    `json:"section"`
+	DayOfWeek  string    `json:"dayOfWeek"`
+	StartTime  string    `json:"startTime"`
+	EndTime    string    `json:"endTime"`
 }
 
 // ActiveScheduleDetails extends ScheduleSummary with full course/session metadata.
 type ActiveScheduleDetails struct {
-	ID           string `json:"id"`
-	CourseCode   string `json:"courseCode"`
-	CourseName   string `json:"courseName"`
-	Credits      int    `json:"credits"`
-	Section      string `json:"section"`
-	Instructor   string `json:"instructor"`
-	DayOfWeek    string `json:"dayOfWeek"`
-	StartTime    string `json:"startTime"`
-	EndTime      string `json:"endTime"`
-	AcademicTerm string `json:"academicTerm"`
+	ID           uuid.UUID `json:"id"`
+	CourseCode   string    `json:"courseCode"`
+	CourseName   string    `json:"courseName"`
+	Credits      int       `json:"credits"`
+	Section      string    `json:"section"`
+	Instructor   string    `json:"instructor"`
+	DayOfWeek    string    `json:"dayOfWeek"`
+	StartTime    string    `json:"startTime"`
+	EndTime      string    `json:"endTime"`
+	AcademicTerm string    `json:"academicTerm"`
 }
 
 // RosterResult represents the active session and pending student roster for a room on a date.
 type RosterResult struct {
-	Room               string                 `json:"room"`
+	Room               RoomCode               `json:"room"`
 	SessionDate        string                 `json:"sessionDate"`
 	DayOfWeek          string                 `json:"dayOfWeek"`
 	Schedule           *ActiveScheduleDetails `json:"schedule"`
@@ -109,10 +107,10 @@ type CheckInRequest struct {
 
 // CheckInResponse represents the JSON payload returned upon successful check-in.
 type CheckInResponse struct {
-	ID          string    `json:"id"`
+	ID          uuid.UUID `json:"id"`
 	StudentID   string    `json:"studentId"`
 	Name        string    `json:"name"`
-	Room        string    `json:"room"`
+	Room        RoomCode  `json:"room"`
 	SessionDate string    `json:"sessionDate"`
 	CheckedInAt time.Time `json:"checkedInAt"`
 }
@@ -162,19 +160,21 @@ type enrolledStudentRow struct {
 // backed by PostgreSQL (GORM) in production and overridable in unit tests.
 type AttendanceStore interface {
 	ListDemoCatalogRows() ([]demoCatalogRow, error)
-	FindRoomByCode(code string) (*models.Room, error)
+	FindRoomByCode(code RoomCode) (*models.Room, error)
 	ListRoomSchedulesForDay(roomID uuid.UUID, targetDay string) ([]rawScheduleRow, error)
 	ListEnrolledStudentsForSchedule(scheduleID uuid.UUID) ([]enrolledStudentRow, error)
-	ListCheckedInStudentIDs(scheduleID uuid.UUID, sessionDate time.Time) ([]uuid.UUID, error)
+	ListCheckedInStudentIDs(scheduleID uuid.UUID, sessionDate SessionDate) ([]uuid.UUID, error)
 	FindStudentByIdentifier(identifier string) (*models.Student, error)
 	FindRegisteredAccountForStudent(student *models.Student) (*uuid.UUID, error)
 	LinkStudentToUser(studentUUID, userUUID uuid.UUID) error
 	IsStudentEnrolled(studentUUID, scheduleID uuid.UUID) (bool, error)
-	HasAttendance(studentUUID, scheduleID uuid.UUID, sessionDate time.Time) (bool, error)
-	InsertAttendance(studentUUID, roomID, scheduleID uuid.UUID, sessionDate time.Time) (time.Time, bool, error)
+	HasAttendance(studentUUID, scheduleID uuid.UUID, sessionDate SessionDate) (bool, error)
+	InsertAttendance(studentUUID, roomID, scheduleID uuid.UUID, sessionDate SessionDate) (time.Time, bool, error)
 }
 
 type gormAttendanceStore struct{}
+
+var _ AttendanceStore = gormAttendanceStore{}
 
 func (gormAttendanceStore) ListDemoCatalogRows() ([]demoCatalogRow, error) {
 	var rows []demoCatalogRow
@@ -204,9 +204,9 @@ func (gormAttendanceStore) ListDemoCatalogRows() ([]demoCatalogRow, error) {
 	return rows, nil
 }
 
-func (gormAttendanceStore) FindRoomByCode(code string) (*models.Room, error) {
+func (gormAttendanceStore) FindRoomByCode(code RoomCode) (*models.Room, error) {
 	var room models.Room
-	err := database.DB.Where("code = ?", code).First(&room).Error
+	err := database.DB.Where("code = ?", code.String()).First(&room).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
@@ -252,7 +252,7 @@ func (gormAttendanceStore) ListEnrolledStudentsForSchedule(scheduleID uuid.UUID)
 		Joins("INNER JOIN student_schedules ON student_schedules.student_id = students.id").
 		Joins("LEFT JOIN users ON (users.id = students.user_id OR users.username = students.student_id)").
 		Joins("LEFT JOIN credentials ON credentials.user_id = users.id").
-		Where("student_schedules.class_schedule_id = ? AND student_schedules.status = ?", scheduleID, "enrolled").
+		Where("student_schedules.class_schedule_id = ? AND student_schedules.status = ?", scheduleID, models.EnrollmentStatusEnrolled).
 		Order("students.name ASC").
 		Scan(&rows).Error
 	if err != nil {
@@ -261,10 +261,10 @@ func (gormAttendanceStore) ListEnrolledStudentsForSchedule(scheduleID uuid.UUID)
 	return rows, nil
 }
 
-func (gormAttendanceStore) ListCheckedInStudentIDs(scheduleID uuid.UUID, sessionDate time.Time) ([]uuid.UUID, error) {
+func (gormAttendanceStore) ListCheckedInStudentIDs(scheduleID uuid.UUID, sessionDate SessionDate) ([]uuid.UUID, error) {
 	var ids []uuid.UUID
 	err := database.DB.Model(&models.Attendance{}).
-		Where("class_schedule_id = ? AND session_date = ?", scheduleID, sessionDate).
+		Where("class_schedule_id = ? AND session_date = ?", scheduleID, sessionDate.UTC()).
 		Pluck("student_id", &ids).Error
 	if err != nil {
 		return nil, err
@@ -322,7 +322,7 @@ func (gormAttendanceStore) LinkStudentToUser(studentUUID, userUUID uuid.UUID) er
 func (gormAttendanceStore) IsStudentEnrolled(studentUUID, scheduleID uuid.UUID) (bool, error) {
 	var count int64
 	err := database.DB.Model(&models.StudentSchedule{}).
-		Where("student_id = ? AND class_schedule_id = ? AND status = ?", studentUUID, scheduleID, "enrolled").
+		Where("student_id = ? AND class_schedule_id = ? AND status = ?", studentUUID, scheduleID, models.EnrollmentStatusEnrolled).
 		Limit(1).
 		Count(&count).Error
 	if err != nil {
@@ -331,10 +331,10 @@ func (gormAttendanceStore) IsStudentEnrolled(studentUUID, scheduleID uuid.UUID) 
 	return count > 0, nil
 }
 
-func (gormAttendanceStore) HasAttendance(studentUUID, scheduleID uuid.UUID, sessionDate time.Time) (bool, error) {
+func (gormAttendanceStore) HasAttendance(studentUUID, scheduleID uuid.UUID, sessionDate SessionDate) (bool, error) {
 	var count int64
 	err := database.DB.Model(&models.Attendance{}).
-		Where("student_id = ? AND class_schedule_id = ? AND session_date = ?", studentUUID, scheduleID, sessionDate).
+		Where("student_id = ? AND class_schedule_id = ? AND session_date = ?", studentUUID, scheduleID, sessionDate.UTC()).
 		Limit(1).
 		Count(&count).Error
 	if err != nil {
@@ -343,12 +343,12 @@ func (gormAttendanceStore) HasAttendance(studentUUID, scheduleID uuid.UUID, sess
 	return count > 0, nil
 }
 
-func (gormAttendanceStore) InsertAttendance(studentUUID, roomID, scheduleID uuid.UUID, sessionDate time.Time) (time.Time, bool, error) {
+func (gormAttendanceStore) InsertAttendance(studentUUID, roomID, scheduleID uuid.UUID, sessionDate SessionDate) (time.Time, bool, error) {
 	att := models.Attendance{
 		StudentID:       studentUUID,
 		RoomID:          roomID,
 		ClassScheduleID: scheduleID,
-		SessionDate:     sessionDate,
+		SessionDate:     sessionDate.UTC(),
 	}
 	res := database.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&att)
 	if res.Error != nil {
@@ -362,8 +362,8 @@ func (gormAttendanceStore) InsertAttendance(studentUUID, roomID, scheduleID uuid
 
 var (
 	attendanceStoreMu sync.RWMutex
-	attendanceStore   AttendanceStore = gormAttendanceStore{}
-	attendanceNow     func() time.Time = time.Now
+	attendanceStore   AttendanceStore   = gormAttendanceStore{}
+	attendanceNow     func() time.Time  = time.Now
 )
 
 // SetAttendanceStore overrides the persistence store for attendance endpoints (used by unit tests).
@@ -394,43 +394,8 @@ func getAttendanceDeps() (AttendanceStore, func() time.Time) {
 	return attendanceStore, attendanceNow
 }
 
-func respondAPIError(c *gin.Context, status int, code, message string) {
-	c.JSON(status, gin.H{
-		"error": message,
-		"code":  code,
-	})
-}
-
-func parseRoomCode(raw string) (string, error) {
-	normalized := strings.ToLower(strings.TrimSpace(raw))
-	if !roomCodeRegex.MatchString(normalized) {
-		return "", errors.New("Room must use the building.floor.room format")
-	}
-	return normalized, nil
-}
-
-func parseSessionDate(raw string) (string, time.Time, error) {
-	trimmed := strings.TrimSpace(raw)
-	if !sessionDateRegex.MatchString(trimmed) {
-		return "", time.Time{}, errors.New("Date must use YYYY-MM-DD format")
-	}
-	parsed, err := time.Parse("2006-01-02", trimmed)
-	if err != nil || parsed.Format("2006-01-02") != trimmed {
-		return "", time.Time{}, errors.New("Invalid calendar date")
-	}
-	return trimmed, parsed.UTC(), nil
-}
-
-func currentSessionDate(now time.Time) string {
-	return now.Format("2006-01-02")
-}
-
 func currentSessionTime(now time.Time) string {
 	return now.Format("15:04")
-}
-
-func formatDisplayDate(t time.Time) string {
-	return t.Format("Mon, Jan 2, 2006")
 }
 
 func normalizeTime(value string) string {
@@ -484,7 +449,7 @@ func fetchRoomSchedulesForDay(store AttendanceStore, roomID uuid.UUID, targetDay
 	schedules := make([]ActiveScheduleDetails, len(rawSchedules))
 	for i, s := range rawSchedules {
 		schedules[i] = ActiveScheduleDetails{
-			ID:           s.ID.String(),
+			ID:           s.ID,
 			CourseCode:   s.CourseCode,
 			CourseName:   s.CourseName,
 			Credits:      s.Credits,
@@ -517,13 +482,13 @@ func fetchRoomSchedulesForDay(store AttendanceStore, roomID uuid.UUID, targetDay
 // 1. Explicit requestedScheduleID if it matches one of the day's schedules
 // 2. When currentTime is provided (viewing today), ongoing or next upcoming session (endTime >= currentTime)
 // 3. First chronological session of that day
-func selectActiveScheduleForDay(schedules []ActiveScheduleDetails, requestedScheduleID string, currentTime *string) *ActiveScheduleDetails {
+func selectActiveScheduleForDay(schedules []ActiveScheduleDetails, requestedScheduleID *uuid.UUID, currentTime *string) *ActiveScheduleDetails {
 	if len(schedules) == 0 {
 		return nil
 	}
-	if requestedScheduleID != "" {
+	if requestedScheduleID != nil {
 		for i := range schedules {
-			if strings.EqualFold(schedules[i].ID, requestedScheduleID) {
+			if schedules[i].ID == *requestedScheduleID {
 				cp := schedules[i]
 				return &cp
 			}
@@ -551,7 +516,7 @@ func GetDemoCatalog(c *gin.Context) {
 	rows, err := store.ListDemoCatalogRows()
 	if err != nil {
 		log.Printf("GetDemoCatalog error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to load demo catalog")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to load demo catalog")
 		return
 	}
 
@@ -573,7 +538,7 @@ func GetDemoCatalog(c *gin.Context) {
 			byRoomCode[normalizedCode] = entry
 		}
 		entry.Schedules = append(entry.Schedules, ScheduleSummary{
-			ID:         row.ScheduleID.String(),
+			ID:         row.ScheduleID,
 			CourseCode: row.CourseCode,
 			CourseName: row.CourseName,
 			Section:    stringOrDefault(row.Section, "A"),
@@ -620,43 +585,41 @@ func GetDemoCatalog(c *gin.Context) {
 func GetRoster(c *gin.Context) {
 	store, nowFn := getAttendanceDeps()
 
-	normalizedRoom, err := parseRoomCode(c.Query("room"))
+	normalizedRoom, err := ParseRoomCode(c.Query("room"))
 	if err != nil {
-		respondAPIError(c, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, err.Error())
 		return
 	}
 
-	var requestedScheduleID string
+	var requestedScheduleID *uuid.UUID
 	if rawSched, hasSched := c.GetQuery("scheduleId"); hasSched && rawSched != "" {
 		parsedSched, err := uuid.Parse(strings.TrimSpace(rawSched))
 		if err != nil {
-			respondAPIError(c, http.StatusBadRequest, "BAD_REQUEST", "Invalid scheduleId UUID")
+			respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "Invalid scheduleId UUID")
 			return
 		}
-		requestedScheduleID = parsedSched.String()
+		requestedScheduleID = &parsedSched
 	}
 
 	now := nowFn()
-	todayStr, todayDateUTC, _ := parseSessionDate(currentSessionDate(now))
-	sessionDateStr := todayStr
-	sessionDateUTC := todayDateUTC
+	today := CurrentSessionDate(now)
+	sessionDate := today
 
 	if rawDate, hasDate := c.GetQuery("date"); hasDate && rawDate != "" {
-		parsedStr, parsedUTC, err := parseSessionDate(rawDate)
+		parsedDate, err := ParseSessionDate(rawDate)
 		if err != nil {
-			respondAPIError(c, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+			respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, err.Error())
 			return
 		}
-		sessionDateStr = parsedStr
-		sessionDateUTC = parsedUTC
+		sessionDate = parsedDate
 	}
 
-	isToday := sessionDateStr == todayStr
-	targetDay := sessionDateUTC.Weekday().String()
+	isToday := sessionDate.Equal(today)
+	targetDay := sessionDate.Weekday().String()
 
 	emptyResult := RosterResult{
 		Room:               normalizedRoom,
-		SessionDate:        sessionDateStr,
+		SessionDate:        sessionDate.String(),
 		DayOfWeek:          targetDay,
 		Schedule:           nil,
 		AvailableSchedules: []ScheduleSummary{},
@@ -668,7 +631,7 @@ func GetRoster(c *gin.Context) {
 	room, err := store.FindRoomByCode(normalizedRoom)
 	if err != nil {
 		log.Printf("GetRoster FindRoomByCode error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to look up room")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to look up room")
 		return
 	}
 	if room == nil {
@@ -679,7 +642,7 @@ func GetRoster(c *gin.Context) {
 	schedules, err := fetchRoomSchedulesForDay(store, room.ID, targetDay)
 	if err != nil {
 		log.Printf("GetRoster fetchRoomSchedulesForDay error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to load room schedules")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to load room schedules")
 		return
 	}
 	if len(schedules) == 0 {
@@ -699,16 +662,10 @@ func GetRoster(c *gin.Context) {
 		return
 	}
 
-	activeUUID, err := uuid.Parse(activeSchedule.ID)
-	if err != nil {
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Invalid active schedule ID")
-		return
-	}
-
-	enrolledRows, err := store.ListEnrolledStudentsForSchedule(activeUUID)
+	enrolledRows, err := store.ListEnrolledStudentsForSchedule(activeSchedule.ID)
 	if err != nil {
 		log.Printf("GetRoster ListEnrolledStudentsForSchedule error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to load enrolled students")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to load enrolled students")
 		return
 	}
 
@@ -721,7 +678,7 @@ func GetRoster(c *gin.Context) {
 			username = *row.Username
 		}
 		entry := EnrolledStudent{
-			ID:           row.ID.String(),
+			ID:           row.ID,
 			StudentID:    row.StudentID,
 			Username:     username,
 			Name:         row.Name,
@@ -740,16 +697,16 @@ func GetRoster(c *gin.Context) {
 		enrolled = append(enrolled, entry)
 	}
 
-	checkedInIDs, err := store.ListCheckedInStudentIDs(activeUUID, sessionDateUTC)
+	checkedInIDs, err := store.ListCheckedInStudentIDs(activeSchedule.ID, sessionDate)
 	if err != nil {
 		log.Printf("GetRoster ListCheckedInStudentIDs error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to load attendance records")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to load attendance records")
 		return
 	}
 
-	checkedInSet := make(map[string]struct{}, len(checkedInIDs))
+	checkedInSet := make(map[uuid.UUID]struct{}, len(checkedInIDs))
 	for _, id := range checkedInIDs {
-		checkedInSet[id.String()] = struct{}{}
+		checkedInSet[id] = struct{}{}
 	}
 
 	pending := make([]EnrolledStudent, 0, len(enrolled))
@@ -777,7 +734,7 @@ func GetRoster(c *gin.Context) {
 
 	c.JSON(http.StatusOK, RosterResult{
 		Room:               normalizedRoom,
-		SessionDate:        sessionDateStr,
+		SessionDate:        sessionDate.String(),
 		DayOfWeek:          targetDay,
 		Schedule:           activeSchedule,
 		AvailableSchedules: availableSchedules,
@@ -794,91 +751,89 @@ func CheckIn(c *gin.Context) {
 
 	var req CheckInRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		respondAPIError(c, http.StatusBadRequest, "BAD_REQUEST", "Invalid JSON request body")
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "Invalid JSON request body")
 		return
 	}
 
-	normalizedRoom, err := parseRoomCode(req.Room)
+	normalizedRoom, err := ParseRoomCode(req.Room)
 	if err != nil {
-		respondAPIError(c, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, err.Error())
 		return
 	}
 
 	if len(req.StudentID) == 0 {
-		respondAPIError(c, http.StatusBadRequest, "BAD_REQUEST", "studentId is required")
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "studentId is required")
 		return
 	}
 
-	var explicitScheduleID string
+	var explicitScheduleID *uuid.UUID
 	if req.ScheduleID != nil {
 		parsedSched, err := uuid.Parse(strings.TrimSpace(*req.ScheduleID))
 		if err != nil {
-			respondAPIError(c, http.StatusBadRequest, "BAD_REQUEST", "Invalid scheduleId UUID")
+			respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, "Invalid scheduleId UUID")
 			return
 		}
-		explicitScheduleID = parsedSched.String()
+		explicitScheduleID = &parsedSched
 	}
 
 	now := nowFn()
-	todayStr, todayDateUTC, _ := parseSessionDate(currentSessionDate(now))
-	sessionDateStr := todayStr
-	sessionDateUTC := todayDateUTC
+	today := CurrentSessionDate(now)
+	sessionDate := today
 
 	if req.Date != nil {
-		parsedStr, parsedUTC, err := parseSessionDate(*req.Date)
+		parsedDate, err := ParseSessionDate(*req.Date)
 		if err != nil {
-			respondAPIError(c, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+			respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, err.Error())
 			return
 		}
-		sessionDateStr = parsedStr
-		sessionDateUTC = parsedUTC
+		sessionDate = parsedDate
 	}
 
-	roomUpper := strings.ToUpper(normalizedRoom)
-	isToday := sessionDateStr == todayStr
-	targetDay := sessionDateUTC.Weekday().String()
+	roomUpper := normalizedRoom.Upper()
+	isToday := sessionDate.Equal(today)
+	targetDay := sessionDate.Weekday().String()
 	whenPhrase := "today"
 	if !isToday {
-		whenPhrase = "on " + formatDisplayDate(sessionDateUTC)
+		whenPhrase = "on " + sessionDate.Display()
 	}
 
 	room, err := store.FindRoomByCode(normalizedRoom)
 	if err != nil {
 		log.Printf("CheckIn FindRoomByCode error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to look up room")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to look up room")
 		return
 	}
 	if room == nil {
-		respondAPIError(c, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("Room %s not found", roomUpper))
+		respondAPIError(c, http.StatusNotFound, ErrCodeNotFound, fmt.Sprintf("Room %s not found", roomUpper))
 		return
 	}
 
 	student, err := store.FindStudentByIdentifier(req.StudentID)
 	if err != nil {
 		log.Printf("CheckIn FindStudentByIdentifier error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to look up student")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to look up student")
 		return
 	}
 	if student == nil {
-		respondAPIError(c, http.StatusNotFound, "NOT_FOUND", "Student not found")
+		respondAPIError(c, http.StatusNotFound, ErrCodeNotFound, "Student not found")
 		return
 	}
 
 	registeredUserID, err := store.FindRegisteredAccountForStudent(student)
 	if err != nil {
 		log.Printf("CheckIn FindRegisteredAccountForStudent error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to verify student passkey")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to verify student passkey")
 		return
 	}
 	if registeredUserID == nil {
-		respondAPIError(c, http.StatusPreconditionFailed, "PRECONDITION_FAILED", fmt.Sprintf("%s has not registered a passkey yet", student.Name))
+		respondAPIError(c, http.StatusPreconditionFailed, ErrCodePreconditionFailed, fmt.Sprintf("%s has not registered a passkey yet", student.Name))
 		return
 	}
 
 	if student.UserID == nil {
 		if err := store.LinkStudentToUser(student.ID, *registeredUserID); err != nil {
 			log.Printf("CheckIn LinkStudentToUser error: %v", err)
-			respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to link student account")
+			respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to link student account")
 			return
 		}
 	}
@@ -886,25 +841,25 @@ func CheckIn(c *gin.Context) {
 	daySchedules, err := fetchRoomSchedulesForDay(store, room.ID, targetDay)
 	if err != nil {
 		log.Printf("CheckIn fetchRoomSchedulesForDay error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to load room schedules")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to load room schedules")
 		return
 	}
 	if len(daySchedules) == 0 {
-		respondAPIError(c, http.StatusPreconditionFailed, "PRECONDITION_FAILED", fmt.Sprintf("No class sessions are scheduled in Room %s %s", roomUpper, whenPhrase))
+		respondAPIError(c, http.StatusPreconditionFailed, ErrCodePreconditionFailed, fmt.Sprintf("No class sessions are scheduled in Room %s %s", roomUpper, whenPhrase))
 		return
 	}
 
 	var activeSchedule *ActiveScheduleDetails
-	if req.ScheduleID != nil {
+	if explicitScheduleID != nil {
 		for i := range daySchedules {
-			if strings.EqualFold(daySchedules[i].ID, explicitScheduleID) {
+			if daySchedules[i].ID == *explicitScheduleID {
 				cp := daySchedules[i]
 				activeSchedule = &cp
 				break
 			}
 		}
 		if activeSchedule == nil {
-			respondAPIError(c, http.StatusBadRequest, "BAD_REQUEST", fmt.Sprintf("Selected class session is not scheduled in Room %s %s", roomUpper, whenPhrase))
+			respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, fmt.Sprintf("Selected class session is not scheduled in Room %s %s", roomUpper, whenPhrase))
 			return
 		}
 	} else {
@@ -913,58 +868,52 @@ func CheckIn(c *gin.Context) {
 			ct := currentSessionTime(now)
 			currentTime = &ct
 		}
-		activeSchedule = selectActiveScheduleForDay(daySchedules, "", currentTime)
+		activeSchedule = selectActiveScheduleForDay(daySchedules, nil, currentTime)
 		if activeSchedule == nil {
-			respondAPIError(c, http.StatusPreconditionFailed, "PRECONDITION_FAILED", fmt.Sprintf("No class sessions are scheduled in Room %s %s", roomUpper, whenPhrase))
+			respondAPIError(c, http.StatusPreconditionFailed, ErrCodePreconditionFailed, fmt.Sprintf("No class sessions are scheduled in Room %s %s", roomUpper, whenPhrase))
 			return
 		}
 	}
 
-	activeUUID, err := uuid.Parse(activeSchedule.ID)
-	if err != nil {
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Invalid active schedule ID")
-		return
-	}
-
-	enrolled, err := store.IsStudentEnrolled(student.ID, activeUUID)
+	enrolled, err := store.IsStudentEnrolled(student.ID, activeSchedule.ID)
 	if err != nil {
 		log.Printf("CheckIn IsStudentEnrolled error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to verify enrollment")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to verify enrollment")
 		return
 	}
 	if !enrolled {
-		respondAPIError(c, http.StatusBadRequest, "BAD_REQUEST", fmt.Sprintf("%s is not enrolled in %s in Room %s", student.Name, activeSchedule.CourseCode, roomUpper))
+		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, fmt.Sprintf("%s is not enrolled in %s in Room %s", student.Name, activeSchedule.CourseCode, roomUpper))
 		return
 	}
 
-	alreadyCheckedIn, err := store.HasAttendance(student.ID, activeUUID, sessionDateUTC)
+	alreadyCheckedIn, err := store.HasAttendance(student.ID, activeSchedule.ID, sessionDate)
 	if err != nil {
 		log.Printf("CheckIn HasAttendance error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to check existing attendance")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to check existing attendance")
 		return
 	}
 	if alreadyCheckedIn {
-		respondAPIError(c, http.StatusConflict, "CONFLICT", fmt.Sprintf("%s is already checked in", student.Name))
+		respondAPIError(c, http.StatusConflict, ErrCodeConflict, fmt.Sprintf("%s is already checked in", student.Name))
 		return
 	}
 
-	checkedInAt, inserted, err := store.InsertAttendance(student.ID, room.ID, activeUUID, sessionDateUTC)
+	checkedInAt, inserted, err := store.InsertAttendance(student.ID, room.ID, activeSchedule.ID, sessionDate)
 	if err != nil {
 		log.Printf("CheckIn InsertAttendance error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Failed to record attendance")
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to record attendance")
 		return
 	}
 	if !inserted {
-		respondAPIError(c, http.StatusConflict, "CONFLICT", fmt.Sprintf("%s is already checked in", student.Name))
+		respondAPIError(c, http.StatusConflict, ErrCodeConflict, fmt.Sprintf("%s is already checked in", student.Name))
 		return
 	}
 
 	c.JSON(http.StatusOK, CheckInResponse{
-		ID:          student.ID.String(),
+		ID:          student.ID,
 		StudentID:   student.StudentID,
 		Name:        student.Name,
 		Room:        normalizedRoom,
-		SessionDate: sessionDateStr,
+		SessionDate: sessionDate.String(),
 		CheckedInAt: checkedInAt,
 	})
 }
