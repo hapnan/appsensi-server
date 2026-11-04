@@ -79,10 +79,14 @@ appsensi-server/
 | `PORT` | `8080` | Port tempat server HTTP berjalan. |
 | `DATABASE_URL` | *(fallback dev lokal di `database/db.go`)* | String koneksi / DSN PostgreSQL (contoh: `host=localhost user=postgres password=<password> dbname=appsensi port=5432 sslmode=disable TimeZone=Asia/Jakarta` atau `postgres://...`). |
 | `ALLOWED_ORIGINS` | `http://localhost:3000` | Daftar origin frontend yang dipisahkan koma untuk izin CORS sekaligus `RPOrigins` WebAuthn (spasi berlebih dan garis miring di akhir karakter otomatis dibersihkan). |
+| `DB_AUTO_MIGRATE` | `false` | Setel ke `true` untuk menjalankan `AutoMigrate` GORM dan pembuatan indeks secara otomatis hanya ketika skema model atau definisi indeks berubah (dilacak menggunakan *fingerprint* SHA-256 pada tabel `app_schema_meta`). |
+| `DB_MAX_OPEN_CONNS` | `20` | Jumlah maksimum koneksi terbuka ke PostgreSQL pada *pool* `sql.DB`. |
+| `DB_MAX_IDLE_CONNS` | `10` | Jumlah maksimum koneksi *idle* yang dipertahankan pada *pool* `sql.DB` (dibatasi hingga `DB_MAX_OPEN_CONNS`). |
+| `DB_SIMPLE_PROTOCOL` | `false` | Setel ke `true` jika terhubung melalui *connection pooler* mode transaksi (mis. PgBouncer / Supavisor) untuk menonaktifkan *cache* *prepared statement* protokol diperluas `pgx`. |
 
 > [!IMPORTANT]
 > **Catatan Pengembangan Lokal**
-> 1. **Migrasi Skema Database**: Blok `db.AutoMigrate(...)` di `database/db.go` dinonaktifkan (dikomentari) secara bawaan karena mengasumsikan skema tabel PostgreSQL sudah tersedia. Untuk database lokal yang masih kosong, jalankan skema SQL Anda terlebih dahulu atau aktifkan sementara blok `AutoMigrate` di `database/db.go`.
+> 1. **Migrasi Skema Database**: Migrasi skema otomatis bersifat *opt-in* (`DB_AUTO_MIGRATE=false` secara bawaan). Setel `DB_AUTO_MIGRATE=true` agar migrasi skema dan indeks dijalankan otomatis saat perubahan terdeteksi, atau terapkan skema SQL serta `database/optimize_indexes.sql` secara manual.
 > 2. **Prasyarat Data Mahasiswa (`students`)**: Saat mendaftarkan `username` baru pertama kali, endpoint `POST /register/begin` mencari baris pada tabel `students` dengan `student_id = username` untuk membuat akun di tabel `users` dan mengisi `display_name` dari `students.name`. Pastikan data mahasiswa tersebut sudah ada di tabel `students` sebelum melakukan registrasi.
 > 3. **Konfigurasi `RPID` WebAuthn & Penyimpanan Sesi**: `RPID` saat ini disetel ke `"localhost"` di `config/webauthn.go`. Akses aplikasi frontend lokal menggunakan `http://localhost:<port>` (bukan `127.0.0.1`) agar validasi domain WebAuthn di peramban berhasil. Sesi tantangan (*challenge*) registrasi/login disimpan di peta memori (*in-memory map*) pada `controllers/auth.go`.
 

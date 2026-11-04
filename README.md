@@ -82,10 +82,14 @@ appsensi-server/
 | `PORT` | `8080` | Port the HTTP server listens on. |
 | `DATABASE_URL` | *(local dev fallback in `database/db.go`)* | PostgreSQL connection string / DSN (e.g., `host=localhost user=postgres password=<password> dbname=appsensi port=5432 sslmode=disable TimeZone=Asia/Jakarta` or `postgres://...`). |
 | `ALLOWED_ORIGINS` | `http://localhost:3000` | Comma-separated list of frontend origins permitted by both CORS and WebAuthn `RPOrigins` (trailing slashes and whitespace are trimmed automatically). |
+| `DB_AUTO_MIGRATE` | `false` | Set to `true` to run GORM `AutoMigrate` and index creation automatically whenever model schemas or index definitions change (tracked via SHA-256 fingerprint in `app_schema_meta`). |
+| `DB_MAX_OPEN_CONNS` | `20` | Maximum open PostgreSQL connections in `sql.DB` pool. |
+| `DB_MAX_IDLE_CONNS` | `10` | Maximum idle PostgreSQL connections retained in `sql.DB` pool (clamped to `DB_MAX_OPEN_CONNS`). |
+| `DB_SIMPLE_PROTOCOL` | `false` | Set to `true` when connecting through a transaction-mode connection pooler (e.g., PgBouncer / Supavisor) to disable `pgx` extended-protocol statement caching. |
 
 > [!IMPORTANT]
 > **Local Development Notes**
-> 1. **Database Migrations**: `db.AutoMigrate(...)` in `database/db.go` is commented out by default, assuming the PostgreSQL schema is already provisioned. For a fresh local database, apply your SQL schema first or uncomment the `AutoMigrate` block in `database/db.go`.
+> 1. **Database Migrations**: Automatic schema migration is opt-in (`DB_AUTO_MIGRATE=false` by default). Set `DB_AUTO_MIGRATE=true` to apply model/index migrations automatically when schema changes are detected, or apply your SQL schema and `database/optimize_indexes.sql` manually.
 > 2. **Student Record Prerequisite**: When registering a username for the first time, `POST /register/begin` queries the `students` table for `student_id = username` to create the `users` row and populate `display_name` from `students.name`. Seed a matching `students` record before registering a new user.
 > 3. **WebAuthn `RPID` & Challenge Sessions**: `RPID` is currently set to `"localhost"` in `config/webauthn.go`. Open your frontend client via `http://localhost:<port>` (not `127.0.0.1`) so browser WebAuthn validation succeeds. Active registration/login challenges are kept in an in-memory map in `controllers/auth.go`.
 
