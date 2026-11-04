@@ -41,10 +41,12 @@ appsensi-server/
 │   ├── attendance.go        # Handler katalog ruangan, daftar hadir aktif & pencatatan presensi
 │   ├── attendance_test.go   # Unit test alur katalog, roster & check-in presensi
 │   ├── auth.go              # Handler registrasi/login WebAuthn & penyimpanan sesi di memori
+│   ├── auth_test.go         # Unit test alur registrasi/login WebAuthn produksi & isolasi sesi
 │   ├── conformance.go       # Endpoint standar FIDO2 Conformance Server
 │   ├── conformance_test.go  # Unit test validasi & alur FIDO2 Conformance
 │   ├── registration.go      # Handler daftar registrasi mahasiswa, penautan user & pembersihan akun
-│   └── registration_test.go # Unit test alur direktori registrasi, penautan & pembersihan akun
+│   ├── registration_test.go # Unit test alur direktori registrasi, penautan & pembersihan akun
+│   └── types.go             # Tipe respons error/status API bersama & value type RoomCode/SessionDate
 ├── database/
 │   └── db.go            # Konfigurasi koneksi PostgreSQL dengan GORM
 ├── models/
@@ -366,6 +368,7 @@ Cakupan pengujian saat ini meliputi:
 - **`config/cors_test.go`**: Pengujian parsing `ALLOWED_ORIGINS` (normalisasi spasi dan garis miring penutup) serta perilaku middleware CORS untuk origin yang diizinkan, header kredensial, dan penolakan *preflight* dari origin asing.
 - **`config/mds_test.go`**: Pemuatan metadata lokal FIDO Conformance (`fido-conformance-mds/`), dukungan algoritma COSE (`ES256K` / `RS1`), serta verifikasi blob JWT MDS3 dinamis.
 - **`controllers/attendance_test.go`**: Pengelompokan & pengurutan katalog ruangan demo, pemilihan sesi kelas aktif & perhitungan daftar hadir (*roster*), serta validasi & penanganan konflik *check-in* presensi.
+- **`controllers/auth_test.go`**: Pengujian seremoni registrasi & login passkey WebAuthn produksi, isolasi sesi antar-seremoni, keamanan pembacaan ulang body request, dan keseragaman format `APIErrorResponse`.
 - **`controllers/conformance_test.go`**: Pengujian menyeluruh registrasi & *assertion* FIDO2 Conformance (`/attestation/*`, `/assertion/*`).
 - **`controllers/registration_test.go`**: Pengujian daftar direktori registrasi mahasiswa, penautan idempoten `students.user_id`, dan pembersihan akun/sesi yang belum selesai.
 - **`models/schema_test.go`**: Memastikan setiap nama kolom GORM pada seluruh 11 model sesuai dengan tag `json`-nya serta menyelaraskan *foreign key* UUID dan indeks unik komposit dengan skema PostgreSQL.
