@@ -28,6 +28,22 @@ func main() {
 	r.POST("/login/begin", controllers.BeginLogin)
 	r.POST("/login/finish", controllers.FinishLogin)
 
+	// Attendance Routes
+	attendanceGroup := r.Group("/attendance")
+	{
+		attendanceGroup.GET("/demo-catalog", controllers.GetDemoCatalog)
+		attendanceGroup.GET("/roster", controllers.GetRoster)
+		attendanceGroup.POST("/check-in", controllers.CheckIn)
+	}
+
+	// Student Passkey Registration Routes
+	registrationGroup := r.Group("/registration")
+	{
+		registrationGroup.GET("/list", controllers.ListRegistrationStudents)
+		registrationGroup.POST("/link-student", controllers.LinkStudentUser)
+		registrationGroup.POST("/cleanup-incomplete", controllers.CleanupIncompleteUser)
+	}
+
 	if config.IsConformanceEnabled() {
 		r.POST("/attestation/options", controllers.ConformanceAttestationOptions)
 		r.POST("/attestation/result", controllers.ConformanceAttestationResult)
