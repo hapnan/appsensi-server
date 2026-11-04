@@ -659,4 +659,54 @@ func TestCheckIn_EndToEndAndErrorPaths(t *testing.T) {
 	if wSecondSession.Code != http.StatusOK {
 		t.Fatalf("second session same room/day failed: %d %s", wSecondSession.Code, wSecondSession.Body.String())
 	}
+
+	// 11. Both room AND student missing simultaneously preserves deterministic precedence (404 Room ... not found)
+	wBothMissing := performPostJSON(r, "/attendance/check-in", map[string]any{
+		"room":      "z.9.9",
+		"studentId": "STU-MISSING",
+	})
+	if wBothMissing.Code != http.StatusNotFound || !strings.Contains(wBothMissing.Body.String(), "Room Z.9.9 not found") {
+		t.Fatalf("both missing precedence = %d %s, want Room Z.9.9 not found", wBothMissing.Code, wBothMissing.Body.String())
+	}
+
+	// 12. Student without passkey on unscheduled Sunday preserves deterministic precedence (412 passkey error first)
+	wUnregSunday := performPostJSON(r, "/attendance/check-in", map[string]any{
+		"room":      "h.2.4",
+		"studentId": "STU-FCS-002",
+		"date":      "2026-11-08", // Sunday (0 schedules)
+	})
+	if wUnregSunday.Code != http.StatusPreconditionFailed || !strings.Contains(wUnregSunday.Body.String(), "Budi Santoso has not registered a passkey yet") {
+		t.Fatalf("unregistered on Sunday precedence = %d %s, want passkey precondition error", wUnregSunday.Code, wUnregSunday.Body.String())
+	}
+
+	// 13. Concurrent Roster + CheckIn requests are race-free
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/attendance/roster?room=h.2.4", nil)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Errorf("concurrent GetRoster status = %d", w.Code)
+			}
+		}()
+		go func(iter int) {
+			defer wg.Done()
+			date := "2026-11-11"
+			if iter%2 == 0 {
+				date = "2026-11-18"
+			}
+			w := performPostJSON(r, "/attendance/check-in", map[string]any{
+				"room":      "h.2.4",
+				"studentId": "STU-FCS-001",
+				"date":      date,
+			})
+			if w.Code != http.StatusOK && w.Code != http.StatusConflict {
+				t.Errorf("concurrent CheckIn status = %d: %s", w.Code, w.Body.String())
+			}
+		}(i)
+	}
+	wg.Wait()
 }

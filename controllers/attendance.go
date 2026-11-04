@@ -206,7 +206,7 @@ func (gormAttendanceStore) ListDemoCatalogRows() ([]demoCatalogRow, error) {
 
 func (gormAttendanceStore) FindRoomByCode(code RoomCode) (*models.Room, error) {
 	var room models.Room
-	err := database.DB.Where("code = ?", code.String()).First(&room).Error
+	err := database.DB.Where("code = ?", code.String()).Take(&room).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
@@ -238,24 +238,47 @@ func (gormAttendanceStore) ListRoomSchedulesForDay(roomID uuid.UUID, targetDay s
 	return rows, nil
 }
 
-func (gormAttendanceStore) ListEnrolledStudentsForSchedule(scheduleID uuid.UUID) ([]enrolledStudentRow, error) {
-	var rows []enrolledStudentRow
-	err := database.DB.Table("students").
+func buildEnrolledStudentsQuery(db *gorm.DB, scheduleID uuid.UUID) *gorm.DB {
+	return db.Table("student_schedules").
 		Select(`students.id,
 			students.student_id,
 			students.name,
 			students.department,
 			students.photo_url,
-			users.id AS user_id,
-			users.username,
-			credentials.id AS credential_id`).
-		Joins("INNER JOIN student_schedules ON student_schedules.student_id = students.id").
-		Joins("LEFT JOIN users ON (users.id = students.user_id OR users.username = students.student_id)").
-		Joins("LEFT JOIN credentials ON credentials.user_id = users.id").
+			CASE
+				WHEN cred_id.id IS NOT NULL THEN u_id.id
+				WHEN cred_name.id IS NOT NULL THEN u_name.id
+				ELSE COALESCE(u_id.id, u_name.id)
+			END AS user_id,
+			CASE
+				WHEN cred_id.id IS NOT NULL THEN u_id.username
+				WHEN cred_name.id IS NOT NULL THEN u_name.username
+				ELSE COALESCE(u_id.username, u_name.username)
+			END AS username,
+			COALESCE(cred_id.id, cred_name.id) AS credential_id`).
+		Joins("INNER JOIN students ON students.id = student_schedules.student_id").
+		Joins("LEFT JOIN users AS u_id ON u_id.id = students.user_id").
+		Joins(`LEFT JOIN LATERAL (
+			SELECT credentials.id
+			FROM credentials
+			WHERE credentials.user_id = u_id.id
+			LIMIT 1
+		) AS cred_id ON u_id.id IS NOT NULL`).
+		Joins(`LEFT JOIN users AS u_name ON u_name.username = students.student_id
+			AND (u_id.id IS NULL OR u_name.id <> u_id.id)`).
+		Joins(`LEFT JOIN LATERAL (
+			SELECT credentials.id
+			FROM credentials
+			WHERE credentials.user_id = u_name.id
+			LIMIT 1
+		) AS cred_name ON u_name.id IS NOT NULL`).
 		Where("student_schedules.class_schedule_id = ? AND student_schedules.status = ?", scheduleID, models.EnrollmentStatusEnrolled).
-		Order("students.name ASC").
-		Scan(&rows).Error
-	if err != nil {
+		Order("students.name ASC")
+}
+
+func (gormAttendanceStore) ListEnrolledStudentsForSchedule(scheduleID uuid.UUID) ([]enrolledStudentRow, error) {
+	var rows []enrolledStudentRow
+	if err := buildEnrolledStudentsQuery(database.DB, scheduleID).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil
@@ -274,14 +297,16 @@ func (gormAttendanceStore) ListCheckedInStudentIDs(scheduleID uuid.UUID, session
 
 func (gormAttendanceStore) FindStudentByIdentifier(identifier string) (*models.Student, error) {
 	var student models.Student
-	q := database.DB
 	if parsedUUID, err := uuid.Parse(identifier); err == nil {
-		q = q.Where("id = ? OR student_id = ?", parsedUUID, identifier)
-	} else {
-		q = q.Where("student_id = ?", identifier)
+		err := database.DB.Where("id = ?", parsedUUID).Take(&student).Error
+		if err == nil {
+			return &student, nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
 	}
-	err := q.First(&student).Error
-	if err != nil {
+	if err := database.DB.Where("student_id = ?", identifier).Take(&student).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
@@ -290,20 +315,31 @@ func (gormAttendanceStore) FindStudentByIdentifier(identifier string) (*models.S
 	return &student, nil
 }
 
+func buildRegisteredAccountQuery(db *gorm.DB, student *models.Student) *gorm.DB {
+	if student.UserID != nil {
+		return db.Raw(`SELECT u.id AS user_id
+			FROM (
+				SELECT id, 1 AS prio FROM users WHERE id = ?
+				UNION ALL
+				SELECT id, 2 AS prio FROM users WHERE username = ? AND id <> ?
+			) AS u
+			WHERE EXISTS (SELECT 1 FROM credentials WHERE credentials.user_id = u.id)
+			ORDER BY u.prio ASC
+			LIMIT 1`, *student.UserID, student.StudentID, *student.UserID)
+	}
+	return db.Raw(`SELECT users.id AS user_id
+		FROM users
+		WHERE users.username = ?
+			AND EXISTS (SELECT 1 FROM credentials WHERE credentials.user_id = users.id)
+		LIMIT 1`, student.StudentID)
+}
+
 func (gormAttendanceStore) FindRegisteredAccountForStudent(student *models.Student) (*uuid.UUID, error) {
 	type accountRow struct {
 		UserID uuid.UUID `gorm:"column:user_id"`
 	}
 	var row accountRow
-	q := database.DB.Table("users").
-		Select("users.id AS user_id").
-		Joins("INNER JOIN credentials ON credentials.user_id = users.id")
-	if student.UserID != nil {
-		q = q.Where("users.id = ? OR users.username = ?", *student.UserID, student.StudentID)
-	} else {
-		q = q.Where("users.username = ?", student.StudentID)
-	}
-	res := q.Limit(1).Scan(&row)
+	res := buildRegisteredAccountQuery(database.DB, student).Scan(&row)
 	if res.Error != nil {
 		return nil, res.Error
 	}
@@ -662,10 +698,32 @@ func GetRoster(c *gin.Context) {
 		return
 	}
 
-	enrolledRows, err := store.ListEnrolledStudentsForSchedule(activeSchedule.ID)
-	if err != nil {
-		log.Printf("GetRoster ListEnrolledStudentsForSchedule error: %v", err)
+	var (
+		enrolledRows []enrolledStudentRow
+		enrolledErr  error
+		checkedInIDs []uuid.UUID
+		checkedInErr error
+		rosterWG     sync.WaitGroup
+	)
+	rosterWG.Add(2)
+	go func() {
+		defer rosterWG.Done()
+		enrolledRows, enrolledErr = store.ListEnrolledStudentsForSchedule(activeSchedule.ID)
+	}()
+	go func() {
+		defer rosterWG.Done()
+		checkedInIDs, checkedInErr = store.ListCheckedInStudentIDs(activeSchedule.ID, sessionDate)
+	}()
+	rosterWG.Wait()
+
+	if enrolledErr != nil {
+		log.Printf("GetRoster ListEnrolledStudentsForSchedule error: %v", enrolledErr)
 		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to load enrolled students")
+		return
+	}
+	if checkedInErr != nil {
+		log.Printf("GetRoster ListCheckedInStudentIDs error: %v", checkedInErr)
+		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to load attendance records")
 		return
 	}
 
@@ -695,13 +753,6 @@ func GetRoster(c *gin.Context) {
 		}
 		indexByID[row.ID] = len(enrolled)
 		enrolled = append(enrolled, entry)
-	}
-
-	checkedInIDs, err := store.ListCheckedInStudentIDs(activeSchedule.ID, sessionDate)
-	if err != nil {
-		log.Printf("GetRoster ListCheckedInStudentIDs error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to load attendance records")
-		return
 	}
 
 	checkedInSet := make(map[uuid.UUID]struct{}, len(checkedInIDs))
@@ -797,9 +848,26 @@ func CheckIn(c *gin.Context) {
 		whenPhrase = "on " + sessionDate.Display()
 	}
 
-	room, err := store.FindRoomByCode(normalizedRoom)
-	if err != nil {
-		log.Printf("CheckIn FindRoomByCode error: %v", err)
+	var (
+		room       *models.Room
+		roomErr    error
+		student    *models.Student
+		studentErr error
+		lookupWG   sync.WaitGroup
+	)
+	lookupWG.Add(2)
+	go func() {
+		defer lookupWG.Done()
+		room, roomErr = store.FindRoomByCode(normalizedRoom)
+	}()
+	go func() {
+		defer lookupWG.Done()
+		student, studentErr = store.FindStudentByIdentifier(req.StudentID)
+	}()
+	lookupWG.Wait()
+
+	if roomErr != nil {
+		log.Printf("CheckIn FindRoomByCode error: %v", roomErr)
 		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to look up room")
 		return
 	}
@@ -808,9 +876,8 @@ func CheckIn(c *gin.Context) {
 		return
 	}
 
-	student, err := store.FindStudentByIdentifier(req.StudentID)
-	if err != nil {
-		log.Printf("CheckIn FindStudentByIdentifier error: %v", err)
+	if studentErr != nil {
+		log.Printf("CheckIn FindStudentByIdentifier error: %v", studentErr)
 		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to look up student")
 		return
 	}
@@ -819,9 +886,26 @@ func CheckIn(c *gin.Context) {
 		return
 	}
 
-	registeredUserID, err := store.FindRegisteredAccountForStudent(student)
-	if err != nil {
-		log.Printf("CheckIn FindRegisteredAccountForStudent error: %v", err)
+	var (
+		registeredUserID *uuid.UUID
+		regErr           error
+		daySchedules     []ActiveScheduleDetails
+		schedErr         error
+		verifyWG         sync.WaitGroup
+	)
+	verifyWG.Add(2)
+	go func() {
+		defer verifyWG.Done()
+		registeredUserID, regErr = store.FindRegisteredAccountForStudent(student)
+	}()
+	go func() {
+		defer verifyWG.Done()
+		daySchedules, schedErr = fetchRoomSchedulesForDay(store, room.ID, targetDay)
+	}()
+	verifyWG.Wait()
+
+	if regErr != nil {
+		log.Printf("CheckIn FindRegisteredAccountForStudent error: %v", regErr)
 		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to verify student passkey")
 		return
 	}
@@ -838,9 +922,8 @@ func CheckIn(c *gin.Context) {
 		}
 	}
 
-	daySchedules, err := fetchRoomSchedulesForDay(store, room.ID, targetDay)
-	if err != nil {
-		log.Printf("CheckIn fetchRoomSchedulesForDay error: %v", err)
+	if schedErr != nil {
+		log.Printf("CheckIn fetchRoomSchedulesForDay error: %v", schedErr)
 		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to load room schedules")
 		return
 	}
@@ -883,17 +966,6 @@ func CheckIn(c *gin.Context) {
 	}
 	if !enrolled {
 		respondAPIError(c, http.StatusBadRequest, ErrCodeBadRequest, fmt.Sprintf("%s is not enrolled in %s in Room %s", student.Name, activeSchedule.CourseCode, roomUpper))
-		return
-	}
-
-	alreadyCheckedIn, err := store.HasAttendance(student.ID, activeSchedule.ID, sessionDate)
-	if err != nil {
-		log.Printf("CheckIn HasAttendance error: %v", err)
-		respondAPIError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to check existing attendance")
-		return
-	}
-	if alreadyCheckedIn {
-		respondAPIError(c, http.StatusConflict, ErrCodeConflict, fmt.Sprintf("%s is already checked in", student.Name))
 		return
 	}
 
