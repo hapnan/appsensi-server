@@ -43,10 +43,12 @@ appsensi-server/
 │   ├── attendance.go        # Room catalog, live session roster & attendance check-in handlers
 │   ├── attendance_test.go   # Unit tests for attendance catalog, roster & check-in flows
 │   ├── auth.go              # Production WebAuthn registration/login handlers
+│   ├── auth_test.go         # Unit tests for production WebAuthn ceremonies & session safety
 │   ├── conformance.go       # Standardized FIDO2 Conformance Server endpoints
 │   ├── conformance_test.go  # End-to-end conformance ceremony & validation tests
 │   ├── registration.go      # Student registration list, user linking & incomplete cleanup handlers
-│   └── registration_test.go # Unit tests for registration directory, linking & cleanup flows
+│   ├── registration_test.go # Unit tests for registration directory, linking & cleanup flows
+│   └── types.go             # Shared typed API error/status envelopes & RoomCode/SessionDate value types
 ├── database/
 │   └── db.go                # PostgreSQL GORM connection setup
 ├── fido-conformance-mds/    # FIDO Alliance conformance authenticator metadata JSON statements
@@ -369,6 +371,7 @@ Current test suites cover:
 - **`config/cors_test.go`**: `ALLOWED_ORIGINS` parsing (whitespace/trailing-slash normalization) and CORS middleware responses for allowed origins, credential headers, and disallowed preflight requests.
 - **`config/mds_test.go`**: Loading all 25 FIDO Conformance metadata JSON files (`fido-conformance-mds/`), COSE algorithm support (`ES256K` / `RS1`), zero-AAGUID U2F key-identifier verification, and dynamic MDS3 JWT blob verification (`x5c`, `x5u`, CRL revocation, poisoned blob isolation, and `nextUpdate` refreshes).
 - **`controllers/attendance_test.go`**: Classroom demo catalog grouping & sorting, active session selection & roster pending calculation, and full attendance check-in validation & conflict handling.
+- **`controllers/auth_test.go`**: Production WebAuthn passkey registration & login ceremonies, ceremony-isolated session enforcement, safe body buffer handling, and unified `APIErrorResponse` envelopes.
 - **`controllers/conformance_test.go`**: End-to-end FIDO2 Conformance registration and assertion ceremonies (`/attestation/*`, `/assertion/*`), strict input validation, `getClientExtensionResults` mapping, duplicate credential rejection, and `signCount` regression (`CloneWarning`) rejection.
 - **`controllers/registration_test.go`**: Student registration directory listing & credential deduplication, idempotent `students.user_id` linking, and incomplete user/session cleanup.
 - **`models/schema_test.go`**: Verifies that every GORM model column name matches its `json` struct tag and aligns UUID foreign keys and composite unique indexes with the PostgreSQL schema.
