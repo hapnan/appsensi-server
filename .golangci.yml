@@ -1,0 +1,23 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - errcheck
+    - errorlint
+    - exhaustive
+    - forcetypeassert
+    - gosec
+    - govet
+    - staticcheck
+  settings:
+    gosec:
+      includes:
+        - G115 # Detect integer overflow conversions (e.g., int64 -> uint32)
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - forcetypeassert
+          - gosec
