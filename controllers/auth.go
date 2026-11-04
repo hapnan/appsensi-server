@@ -108,16 +108,31 @@ type gormAuthStore struct{}
 
 var _ AuthStore = gormAuthStore{}
 
+var credentialCeremonyOmitColumns = []string{"Attestation", "Extensions", "Flags"}
+
+func omitUnusedCredentialBlobs(db *gorm.DB) *gorm.DB {
+	return db.Omit(credentialCeremonyOmitColumns...)
+}
+
+func queryUserWithOptionalWebAuthn(db *gorm.DB, username, rpid string) *gorm.DB {
+	return db.
+		Joins("WebAuthnUser", db.Where(&models.WebAuthnUser{RpID: rpid}, "RpID")).
+		Preload("Credentials", omitUnusedCredentialBlobs).
+		Where("users.username = ?", username)
+}
+
+func queryUserForLogin(db *gorm.DB, username, rpid string) *gorm.DB {
+	return db.
+		InnerJoins("WebAuthnUser", db.Where(&models.WebAuthnUser{RpID: rpid}, "RpID")).
+		Preload("Credentials", omitUnusedCredentialBlobs).
+		Where("users.username = ?", username)
+}
+
 // GetOrCreateUserForRegistration gets an existing user or creates one from the Student table.
 func (gormAuthStore) GetOrCreateUserForRegistration(username string, email string, rpid string) (*models.User, error) {
 	var user models.User
 
-	// Note: Use "rpid = ?" if your DB column is rpid, or "rp_id = ?" if GORM auto-migrated it without column:rpid
-	err := database.DB.
-		Preload("WebAuthnUser", "rp_id = ?", rpid).
-		Preload("Credentials").
-		Where("username = ?", username).
-		First(&user).Error
+	err := queryUserWithOptionalWebAuthn(database.DB, username, rpid).Take(&user).Error
 
 	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -125,7 +140,7 @@ func (gormAuthStore) GetOrCreateUserForRegistration(username string, email strin
 		}
 
 		var student models.Student
-		if err := database.DB.Where("student_id = ?", username).First(&student).Error; err != nil {
+		if err := database.DB.Where("student_id = ?", username).Take(&student).Error; err != nil {
 			return nil, err
 		}
 
@@ -163,11 +178,7 @@ func (gormAuthStore) GetOrCreateUserForRegistration(username string, email strin
 // GetExistingUserForLogin strictly looks up an existing user without creating new DB rows.
 func (gormAuthStore) GetExistingUserForLogin(username string, rpid string) (*models.User, error) {
 	var user models.User
-	err := database.DB.
-		Preload("WebAuthnUser", "rp_id = ?", rpid).
-		Preload("Credentials").
-		Where("username = ?", username).
-		First(&user).Error
+	err := queryUserForLogin(database.DB, username, rpid).Take(&user).Error
 	if err != nil {
 		return nil, err
 	}
