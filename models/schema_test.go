@@ -63,3 +63,61 @@ func TestCredentialAAGUIDColumnName(t *testing.T) {
 		t.Fatalf("expected Credential.AAGUID DBName to be 'aaguid', got %q", field.DBName)
 	}
 }
+
+func TestStudentAndAttendanceSchemaAlignment(t *testing.T) {
+	cache := &sync.Map{}
+	namer := schema.NamingStrategy{}
+
+	ssSchema, err := schema.Parse(&StudentSchedule{}, cache, namer)
+	if err != nil {
+		t.Fatalf("failed to parse StudentSchedule schema: %v", err)
+	}
+	ssStudentID := ssSchema.LookUpField("StudentID")
+	if ssStudentID == nil {
+		t.Fatal("StudentSchedule.StudentID field not found")
+	}
+	if string(ssStudentID.DataType) != "uuid" {
+		t.Fatalf("expected StudentSchedule.StudentID DataType 'uuid', got %q", ssStudentID.DataType)
+	}
+
+	attSchema, err := schema.Parse(&Attendance{}, cache, namer)
+	if err != nil {
+		t.Fatalf("failed to parse Attendance schema: %v", err)
+	}
+	for _, fieldName := range []string{"StudentID", "RoomID", "ClassScheduleID"} {
+		f := attSchema.LookUpField(fieldName)
+		if f == nil {
+			t.Fatalf("Attendance.%s field not found", fieldName)
+		}
+		if string(f.DataType) != "uuid" {
+			t.Fatalf("expected Attendance.%s DataType 'uuid', got %q", fieldName, f.DataType)
+		}
+		if !f.NotNull {
+			t.Fatalf("expected Attendance.%s to be NOT NULL", fieldName)
+		}
+	}
+
+	indexes := attSchema.ParseIndexes()
+	var uniqueIdx *schema.Index
+	for _, idx := range indexes {
+		if idx.Name == "attendance_student_room_day_idx" {
+			uniqueIdx = idx
+			break
+		}
+	}
+	if uniqueIdx == nil {
+		t.Fatal("attendance_student_room_day_idx not found on Attendance schema")
+	}
+	if uniqueIdx.Class != "UNIQUE" {
+		t.Fatalf("expected attendance_student_room_day_idx to be UNIQUE, got %q", uniqueIdx.Class)
+	}
+	wantCols := []string{"student_id", "class_schedule_id", "session_date"}
+	if len(uniqueIdx.Fields) != len(wantCols) {
+		t.Fatalf("expected %d fields in attendance_student_room_day_idx, got %d", len(wantCols), len(uniqueIdx.Fields))
+	}
+	for i, want := range wantCols {
+		if uniqueIdx.Fields[i].DBName != want {
+			t.Errorf("attendance_student_room_day_idx field[%d] = %q, want %q", i, uniqueIdx.Fields[i].DBName, want)
+		}
+	}
+}
