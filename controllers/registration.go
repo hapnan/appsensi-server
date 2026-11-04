@@ -78,22 +78,43 @@ type gormRegistrationStore struct{}
 
 var _ RegistrationStore = gormRegistrationStore{}
 
-func (gormRegistrationStore) ListStudentsWithRegistration() ([]registrationJoinRow, error) {
-	var rows []registrationJoinRow
-	err := database.DB.Table("students").
-		Select(`students.id,
+func buildStudentsWithRegistrationQuery(db *gorm.DB) *gorm.DB {
+	return db.Raw(`WITH first_cred AS (
+			SELECT DISTINCT ON (user_id) user_id, id
+			FROM credentials
+		)
+		SELECT students.id,
 			students.name,
 			students.student_id AS username,
 			students.department,
-			users.id AS user_id,
-			users.email,
-			users.created_at,
-			credentials.id AS credential_id`).
-		Joins("LEFT JOIN users ON (users.id = students.user_id OR users.username = students.student_id)").
-		Joins("LEFT JOIN credentials ON credentials.user_id = users.id").
-		Order("students.student_id ASC").
-		Scan(&rows).Error
-	if err != nil {
+			CASE
+				WHEN cred_id.id IS NOT NULL THEN u_id.id
+				WHEN cred_name.id IS NOT NULL THEN u_name.id
+				ELSE COALESCE(u_id.id, u_name.id)
+			END AS user_id,
+			CASE
+				WHEN cred_id.id IS NOT NULL THEN u_id.email
+				WHEN cred_name.id IS NOT NULL THEN u_name.email
+				ELSE COALESCE(u_id.email, u_name.email)
+			END AS email,
+			CASE
+				WHEN cred_id.id IS NOT NULL THEN u_id.created_at
+				WHEN cred_name.id IS NOT NULL THEN u_name.created_at
+				ELSE COALESCE(u_id.created_at, u_name.created_at)
+			END AS created_at,
+			COALESCE(cred_id.id, cred_name.id) AS credential_id
+		FROM students
+		LEFT JOIN users AS u_id ON u_id.id = students.user_id
+		LEFT JOIN first_cred AS cred_id ON cred_id.user_id = u_id.id
+		LEFT JOIN users AS u_name ON u_name.username = students.student_id
+			AND (u_id.id IS NULL OR u_name.id <> u_id.id)
+		LEFT JOIN first_cred AS cred_name ON cred_name.user_id = u_name.id
+		ORDER BY students.student_id ASC`)
+}
+
+func (gormRegistrationStore) ListStudentsWithRegistration() ([]registrationJoinRow, error) {
+	var rows []registrationJoinRow
+	if err := buildStudentsWithRegistrationQuery(database.DB).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil
@@ -101,7 +122,7 @@ func (gormRegistrationStore) ListStudentsWithRegistration() ([]registrationJoinR
 
 func (gormRegistrationStore) FindUserByUsername(username string) (*models.User, error) {
 	var user models.User
-	err := database.DB.Where("username = ?", username).First(&user).Error
+	err := database.DB.Where("username = ?", username).Take(&user).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
