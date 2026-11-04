@@ -243,6 +243,10 @@ func FinishRegistration(c *gin.Context) {
 		return
 	}
 
+	if err := linkStudentAfterRegistration(user.Username, user.ID); err != nil {
+		log.Printf("FinishRegistration warning: failed to link student %q to user %s: %v", user.Username, user.ID, err)
+	}
+
 	deleteSession(user.ID)
 	c.JSON(http.StatusOK, gin.H{"status": "registration success"})
 }
