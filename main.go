@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"net/http"
 	"os"
 
 	"appsensi-server/config"
@@ -52,8 +53,8 @@ func main() {
 	}
 
 	r.GET("/ping", func(c *gin.Context) {
-		c.JSON(200, gin.H{
-			"message": "pong",
+		c.JSON(http.StatusOK, controllers.HealthResponse{
+			Message: "pong",
 		})
 	})
 
