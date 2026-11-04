@@ -123,7 +123,7 @@ type WebAuthnUser struct {
 	ID        uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
 	CreatedAt time.Time `gorm:"type:timestamptz;not null;default:now()" json:"created_at"`
 	RpID      string    `gorm:"column:rp_id;type:varchar(512);not null;uniqueIndex:webauthn_users_user_id_key;uniqueIndex:webauthn_users_handle_key" json:"rp_id"`
-	UserID    uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:webauthn_users_user_id_key" json:"user_id"`
+	UserID    uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:webauthn_users_user_id_key;index:webauthn_users_user_idx" json:"user_id"`
 	User      User      `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE" json:"-"`
 	Handle    []byte    `gorm:"type:bytea;not null;uniqueIndex:webauthn_users_handle_key" json:"handle"`
 }
@@ -133,9 +133,9 @@ func (WebAuthnUser) TableName() string { return "webauthn_users" }
 // Credential corresponds to the "credentials" table
 type Credential struct {
 	ID                uuid.UUID                       `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
-	UserID            uuid.UUID                       `gorm:"type:uuid;not null;uniqueIndex:credentials_user_credential_idx" json:"user_id"`
+	UserID            uuid.UUID                       `gorm:"type:uuid;not null;uniqueIndex:credentials_user_credential_idx,priority:1" json:"user_id"`
 	User              User                            `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE" json:"-"`
-	CredentialID      []byte                          `gorm:"type:bytea;not null;unique;uniqueIndex:credentials_user_credential_idx" json:"credential_id"`
+	CredentialID      []byte                          `gorm:"type:bytea;not null;unique;uniqueIndex:credentials_user_credential_idx,priority:2" json:"credential_id"`
 	AAGUID            []byte                          `gorm:"column:aaguid;type:bytea;not null" json:"aaguid"`
 	PublicKey         []byte                          `gorm:"type:bytea;not null" json:"public_key"`
 	AttestationType   string                          `gorm:"type:text;not null" json:"attestation_type"`
