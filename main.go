@@ -4,11 +4,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"appsensi-server/config"
 	"appsensi-server/controllers"
 	"appsensi-server/database"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
@@ -21,7 +23,15 @@ func main() {
 	}
 
 	r := gin.Default()
-	r.Use(config.CORSMiddleware())
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:        []string{os.Getenv("ALLOWED_ORIGINS")},
+		AllowMethods:        []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:        []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With"},
+		ExposeHeaders:       []string{"Content-Length"},
+		AllowCredentials:    true,
+		MaxAge:              12 * time.Hour,
+		AllowPrivateNetwork: os.Getenv("ALLOW_PRIVATE_NETWORK") == "true",
+	}))
 	// WebAuthn Routes
 	r.POST("/register/begin", controllers.BeginRegistration)
 	r.POST("/register/finish", controllers.FinishRegistration)
