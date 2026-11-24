@@ -24,7 +24,9 @@ import (
 
 type memoryAuthStore struct {
 	mu                sync.Mutex
-	studentsByID      map[string]string // student_id -> display name
+	studentsByID      map[string]string
+	employeesByID     map[string]string
+	lecturersByID     map[string]string
 	usersByName       map[string]*models.User
 	credsByID         map[string]*models.Credential
 	failUpdateOnLogin bool
@@ -34,9 +36,11 @@ var _ AuthStore = (*memoryAuthStore)(nil)
 
 func newMemoryAuthStore() *memoryAuthStore {
 	return &memoryAuthStore{
-		studentsByID: make(map[string]string),
-		usersByName:  make(map[string]*models.User),
-		credsByID:    make(map[string]*models.Credential),
+		studentsByID:  make(map[string]string),
+		employeesByID: make(map[string]string),
+		lecturersByID: make(map[string]string),
+		usersByName:   make(map[string]*models.User),
+		credsByID:     make(map[string]*models.Credential),
 	}
 }
 
@@ -57,11 +61,20 @@ func (s *memoryAuthStore) GetOrCreateUserForRegistration(username, email, rpid s
 
 	u, ok := s.usersByName[username]
 	if !ok {
-		studentName, exists := s.studentsByID[username]
-		if !exists {
-			return nil, errors.New("student not found")
+		var dn string
+		userType := models.UserTypeStudent
+		if name, ok := s.studentsByID[username]; ok {
+			dn = name
+			userType = models.UserTypeStudent
+		} else if name, ok := s.employeesByID[username]; ok {
+			dn = name
+			userType = models.UserTypeEmployee
+		} else if name, ok := s.lecturersByID[username]; ok {
+			dn = name
+			userType = models.UserTypeLecturer
+		} else {
+			return nil, errors.New("person not found")
 		}
-		dn := studentName
 		handle := make([]byte, 32)
 		_, _ = rand.Read(handle)
 		id := uuid.New()
@@ -70,6 +83,7 @@ func (s *memoryAuthStore) GetOrCreateUserForRegistration(username, email, rpid s
 			Username:    username,
 			Email:       email,
 			DisplayName: &dn,
+			UserType:    userType,
 			WebAuthnUser: &models.WebAuthnUser{
 				ID:     uuid.New(),
 				RpID:   rpid,
@@ -330,3 +344,116 @@ func TestRestoreBufferedRequestBody_NonByteSliceDoesNotPanic(t *testing.T) {
 		t.Fatal("expected true when BodyBytesKey holds []byte")
 	}
 }
+
+type memoryDashboardAuthStore struct {
+ mu sync.Mutex
+ byUserID map[uuid.UUID]DashboardUserContext
+ byUsername map[string]DashboardUserContext
+}
+
+func newMemoryDashboardAuthStore() *memoryDashboardAuthStore {
+ return &memoryDashboardAuthStore{
+ byUserID: make(map[uuid.UUID]DashboardUserContext),
+ byUsername: make(map[string]DashboardUserContext),
+ }
+}
+
+func (m *memoryDashboardAuthStore) put(ctx DashboardUserContext) {
+ m.mu.Lock()
+ defer m.mu.Unlock()
+ if ctx.UserID != uuid.Nil { m.byUserID[ctx.UserID] = cloneDashboardUserContext(ctx) }
+ if ctx.Username != "" { m.byUsername[ctx.Username] = cloneDashboardUserContext(ctx) }
+}
+
+func (m *memoryDashboardAuthStore) ResolveUserContextByUserID(userID uuid.UUID) (*DashboardUserContext, error) {
+ m.mu.Lock()
+ defer m.mu.Unlock()
+ ctx, ok := m.byUserID[userID]
+ if !ok { return nil, errors.New("not found") }
+ cp := cloneDashboardUserContext(ctx)
+ return &cp, nil
+}
+
+func (m *memoryDashboardAuthStore) ResolveUserContextByUsername(username string) (*DashboardUserContext, error) {
+ m.mu.Lock()
+ defer m.mu.Unlock()
+ ctx, ok := m.byUsername[username]
+ if !ok { return nil, errors.New("not found") }
+ cp := cloneDashboardUserContext(ctx)
+ return &cp, nil
+}
+
+func TestAuth_EmployeeAndLecturerCeremonyAndLoginContext(t *testing.T) {
+ r, aStore, _ := setupAuthTestRouter(t)
+ staffStore := newMemoryStaffRegistrationStore()
+ dashStore := newMemoryDashboardAuthStore()
+ SetStaffRegistrationStore(staffStore)
+ SetDashboardAuthStore(dashStore)
+ ClearPasskeySessions()
+ t.Cleanup(func() {
+ SetStaffRegistrationStore(nil)
+ SetDashboardAuthStore(nil)
+ ClearPasskeySessions()
+ })
+ r.GET("/dashboard/me", GetDashboardMe)
+ fcsID := uuid.New()
+ cases := []struct {
+ username string
+ email string
+ displayName string
+ userType models.UserType
+ profileID uuid.UUID
+ jobRole *models.EmployeeJobRole
+ facultyID *uuid.UUID
+ facultyCode *string
+ facultyName *string
+ }{
+ {username: "EMP-FIN-001", email: "fin@campus.edu", displayName: "Rina Finance", userType: models.UserTypeEmployee, profileID: uuid.New(), jobRole: rolePtr(models.JobRoleFinance)},
+ {username: "EMP-ACA-001", email: "aca@campus.edu", displayName: "Budi Academic", userType: models.UserTypeEmployee, profileID: uuid.New(), jobRole: rolePtr(models.JobRoleAcademicAffairs)},
+ {username: "EMP-SA-FCS-001", email: "sa.fcs@campus.edu", displayName: "Siti Student Affairs", userType: models.UserTypeEmployee, profileID: uuid.New(), jobRole: rolePtr(models.JobRoleStudentAffairs), facultyID: &fcsID, facultyCode: strPtr("FCS"), facultyName: strPtr("Faculty of Computer Science")},
+ {username: "LEC-FCS-001", email: "lec.fcs@campus.edu", displayName: "Dr. Hendra", userType: models.UserTypeLecturer, profileID: uuid.New(), facultyID: &fcsID, facultyCode: strPtr("FCS"), facultyName: strPtr("Faculty of Computer Science")},
+ }
+ for i, tc := range cases {
+ if tc.userType == models.UserTypeEmployee {
+ aStore.employeesByID[tc.username] = tc.displayName
+ staffStore.empByBadge[tc.username] = tc.profileID
+ } else {
+ aStore.lecturersByID[tc.username] = tc.displayName
+ staffStore.lecByBadge[tc.username] = tc.profileID
+ }
+ pID := tc.profileID
+ dashStore.put(DashboardUserContext{Username: tc.username, Email: tc.email, DisplayName: tc.displayName, UserType: tc.userType, ProfileID: &pID, JobRole: tc.jobRole, FacultyID: tc.facultyID, FacultyCode: tc.facultyCode, FacultyName: tc.facultyName})
+ wBegin := performPostJSON(r, "/register/begin", map[string]any{"username": tc.username, "email": tc.email})
+ if wBegin.Code != http.StatusOK { t.Fatalf("[%s] BeginRegistration = %d: %s", tc.username, wBegin.Code, wBegin.Body.String()) }
+ var creation protocol.CredentialCreation
+ _ = json.Unmarshal(wBegin.Body.Bytes(), &creation)
+ priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+ credID := []byte("staff-cred-00" + string(rune(49+i)))
+ credIDB64 := base64.RawURLEncoding.EncodeToString(credID)
+ attObjB64, regClientDataB64 := buildPackedSurrogateAttestation(t, "localhost", 1, make([]byte, 16), credID, priv, creation.Response.Challenge.String(), "http://localhost:3000")
+ wFin := performPostJSON(r, "/register/finish", map[string]any{"username": tc.username, "email": tc.email, "id": credIDB64, "rawId": credIDB64, "type": "public-key", "response": map[string]any{"attestationObject": attObjB64, "clientDataJSON": regClientDataB64, "transports": []string{"hybrid"}}})
+ if wFin.Code != http.StatusOK { t.Fatalf("[%s] FinishRegistration = %d: %s", tc.username, wFin.Code, wFin.Body.String()) }
+ if tc.userType == models.UserTypeEmployee {
+ if _, ok := staffStore.empLink[tc.profileID]; !ok { t.Fatalf("[%s] expected employee to be auto-linked", tc.username) }
+ } else {
+ if _, ok := staffStore.lecLink[tc.profileID]; !ok { t.Fatalf("[%s] expected lecturer to be auto-linked", tc.username) }
+ }
+ wLoginBegin := performPostJSON(r, "/login/begin", map[string]any{"username": tc.username})
+ var assertion protocol.CredentialAssertion
+ _ = json.Unmarshal(wLoginBegin.Body.Bytes(), &assertion)
+ authData, clientData, sig := buildAssertionResponse(t, "localhost", 2, priv, assertion.Response.Challenge.String(), "http://localhost:3000")
+ wLoginFin := performPostJSON(r, "/login/finish", map[string]any{"username": tc.username, "id": credIDB64, "rawId": credIDB64, "type": "public-key", "response": map[string]any{"authenticatorData": authData, "clientDataJSON": clientData, "signature": sig}})
+ if wLoginFin.Code != http.StatusOK { t.Fatalf("[%s] FinishLogin = %d: %s", tc.username, wLoginFin.Code, wLoginFin.Body.String()) }
+ var loginRes AuthStatusResponse
+ if err := json.Unmarshal(wLoginFin.Body.Bytes(), &loginRes); err != nil { t.Fatalf("unmarshal loginRes: %v", err) }
+ if loginRes.SessionToken == "" || loginRes.User == nil { t.Fatalf("[%s] expected SessionToken and User in login response, got %+v", tc.username, loginRes) }
+ if loginRes.User.UserType != tc.userType || loginRes.User.ProfileID == nil || *loginRes.User.ProfileID != tc.profileID { t.Fatalf("[%s] unexpected User context: %+v", tc.username, loginRes.User) }
+ reqMe := httptest.NewRequest(http.MethodGet, "/dashboard/me", nil)
+ reqMe.Header.Set("Authorization", "Bearer "+loginRes.SessionToken)
+ wMe := httptest.NewRecorder()
+ r.ServeHTTP(wMe, reqMe)
+ if wMe.Code != http.StatusOK { t.Fatalf("[%s] GET /dashboard/me = %d: %s", tc.username, wMe.Code, wMe.Body.String()) }
+ }
+}
+
+func rolePtr(r models.EmployeeJobRole) *models.EmployeeJobRole { return &r }

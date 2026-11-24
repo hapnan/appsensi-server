@@ -128,6 +128,28 @@ func queryUserForLogin(db *gorm.DB, username, rpid string) *gorm.DB {
 		Where("users.username = ?", username)
 }
 
+func lookupPersonForRegistration(db *gorm.DB, username string) (displayName string, userType models.UserType, err error) {
+	var student models.Student
+	if err := db.Where("student_id = ?", username).Take(&student).Error; err == nil {
+		return student.Name, models.UserTypeStudent, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", "", err
+	}
+	var employee models.Employee
+	if err := db.Where("employee_id = ?", username).Take(&employee).Error; err == nil {
+		return employee.Name, models.UserTypeEmployee, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", "", err
+	}
+	var lecturer models.Lecturer
+	if err := db.Where("lecturer_id = ?", username).Take(&lecturer).Error; err == nil {
+		return lecturer.Name, models.UserTypeLecturer, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", "", err
+	}
+	return "", "", gorm.ErrRecordNotFound
+}
+
 // GetOrCreateUserForRegistration gets an existing user or creates one from the Student table.
 func (gormAuthStore) GetOrCreateUserForRegistration(username string, email string, rpid string) (*models.User, error) {
 	var user models.User
@@ -139,16 +161,11 @@ func (gormAuthStore) GetOrCreateUserForRegistration(username string, email strin
 			return nil, err
 		}
 
-		var student models.Student
-		if err := database.DB.Where("student_id = ?", username).Take(&student).Error; err != nil {
+		displayName, userType, err := lookupPersonForRegistration(database.DB, username)
+		if err != nil {
 			return nil, err
 		}
-
-		user = models.User{
-			Username:    username,
-			Email:       email,
-			DisplayName: &student.Name,
-		}
+		user = models.User{Username: username, Email: email, DisplayName: &displayName, UserType: userType}
 		if err := database.DB.Create(&user).Error; err != nil {
 			return nil, err
 		}
@@ -364,8 +381,8 @@ func FinishRegistration(c *gin.Context) {
 		return
 	}
 
-	if err := linkStudentAfterRegistration(user.Username, user.ID); err != nil {
-		log.Printf("FinishRegistration warning: failed to link student %q to user %s: %v", user.Username, user.ID, err)
+	if err := linkAccountAfterRegistration(user); err != nil {
+		log.Printf("FinishRegistration warning: failed to link account %q (%s) to user %s: %v", user.Username, user.UserType, user.ID, err)
 	}
 
 	deleteSession(user.ID)
@@ -467,8 +484,7 @@ func FinishLogin(c *gin.Context) {
 
 	deleteSession(user.ID)
 
-	c.JSON(http.StatusOK, AuthStatusResponse{
-		Status:  "login success",
-		Message: "User authenticated successfully",
-	})
+	userCtx := ResolveUserContextForLogin(user)
+	sessionToken := CreatePasskeySession(userCtx)
+	c.JSON(http.StatusOK, AuthStatusResponse{Status: "login success", Message: "User authenticated successfully", SessionToken: sessionToken, User: &userCtx})
 }
