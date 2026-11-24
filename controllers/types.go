@@ -6,7 +6,10 @@ import (
 	"strings"
 	"time"
 
+	"appsensi-server/models"
+
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // APIErrorCode identifies the machine-readable category of an API error response.
@@ -14,6 +17,8 @@ type APIErrorCode string
 
 const (
 	ErrCodeBadRequest         APIErrorCode = "BAD_REQUEST"
+	ErrCodeUnauthorized       APIErrorCode = "UNAUTHORIZED"
+	ErrCodeForbidden          APIErrorCode = "FORBIDDEN"
 	ErrCodeNotFound           APIErrorCode = "NOT_FOUND"
 	ErrCodePreconditionFailed APIErrorCode = "PRECONDITION_FAILED"
 	ErrCodeConflict           APIErrorCode = "CONFLICT"
@@ -32,9 +37,26 @@ type HealthResponse struct {
 }
 
 // AuthStatusResponse represents the JSON payload returned upon WebAuthn ceremony completion.
+type DashboardUserContext struct {
+	UserID      uuid.UUID               `json:"userId"`
+	Username    string                  `json:"username"`
+	Email       string                  `json:"email"`
+	DisplayName string                  `json:"displayName"`
+	UserType    models.UserType         `json:"userType"`
+	ProfileID   *uuid.UUID              `json:"profileId,omitempty"`
+	JobRole     *models.EmployeeJobRole `json:"jobRole,omitempty"`
+	Department  *string                 `json:"department,omitempty"`
+	FacultyID   *uuid.UUID              `json:"facultyId,omitempty"`
+	FacultyCode *string                 `json:"facultyCode,omitempty"`
+	FacultyName *string                 `json:"facultyName,omitempty"`
+}
+
+// AuthStatusResponse represents the JSON payload returned upon WebAuthn ceremony completion.
 type AuthStatusResponse struct {
-	Status  string `json:"status"`
-	Message string `json:"message,omitempty"`
+	Status       string                `json:"status"`
+	Message      string                `json:"message,omitempty"`
+	SessionToken string                `json:"sessionToken,omitempty"`
+	User         *DashboardUserContext `json:"user,omitempty"`
 }
 
 func respondAPIError(c *gin.Context, status int, code APIErrorCode, message string) {

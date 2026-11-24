@@ -261,3 +261,214 @@ func TestCleanupIncompleteUser(t *testing.T) {
 		t.Fatal("pending WebAuthn session for incomplete user should have been cleared")
 	}
 }
+
+type memoryStaffRegistrationStore struct {
+	mu          sync.Mutex
+	empRows     []employeeRegistrationJoinRow
+	lecRows     []lecturerRegistrationJoinRow
+	usersByName map[string]*models.User
+	empLink     map[uuid.UUID]uuid.UUID
+	empByBadge  map[string]uuid.UUID
+	lecLink     map[uuid.UUID]uuid.UUID
+	lecByBadge  map[string]uuid.UUID
+}
+
+func newMemoryStaffRegistrationStore() *memoryStaffRegistrationStore {
+	return &memoryStaffRegistrationStore{
+		usersByName: make(map[string]*models.User),
+		empLink:     make(map[uuid.UUID]uuid.UUID),
+		empByBadge:  make(map[string]uuid.UUID),
+		lecLink:     make(map[uuid.UUID]uuid.UUID),
+		lecByBadge:  make(map[string]uuid.UUID),
+	}
+}
+
+func (m *memoryStaffRegistrationStore) ListEmployeesWithRegistration() ([]employeeRegistrationJoinRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.empRows), nil
+}
+
+func (m *memoryStaffRegistrationStore) UpdateEmployeeUserID(employeeUUID, userUUID uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.empLink[employeeUUID] = userUUID
+	return nil
+}
+
+func (m *memoryStaffRegistrationStore) LinkEmployeeByUsernameIfUnlinked(username string, userUUID uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if empUUID, ok := m.empByBadge[username]; ok {
+		if _, alreadyLinked := m.empLink[empUUID]; !alreadyLinked {
+			m.empLink[empUUID] = userUUID
+		}
+	}
+	return nil
+}
+
+func (m *memoryStaffRegistrationStore) ListLecturersWithRegistration() ([]lecturerRegistrationJoinRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.lecRows), nil
+}
+
+func (m *memoryStaffRegistrationStore) UpdateLecturerUserID(lecturerUUID, userUUID uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lecLink[lecturerUUID] = userUUID
+	return nil
+}
+
+func (m *memoryStaffRegistrationStore) LinkLecturerByUsernameIfUnlinked(username string, userUUID uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if lecUUID, ok := m.lecByBadge[username]; ok {
+		if _, alreadyLinked := m.lecLink[lecUUID]; !alreadyLinked {
+			m.lecLink[lecUUID] = userUUID
+		}
+	}
+	return nil
+}
+
+func (m *memoryStaffRegistrationStore) FindUserByUsername(username string) (*models.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.usersByName[username]
+	if !ok {
+		return nil, nil
+	}
+	cp := *u
+	return &cp, nil
+}
+
+func setupStaffRegistrationTestRouter(t *testing.T, staffStore StaffRegistrationStore) *gin.Engine {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	SetStaffRegistrationStore(staffStore)
+	t.Cleanup(func() { SetStaffRegistrationStore(nil) })
+	r := gin.New()
+	reg := r.Group("/registration")
+	{
+		reg.GET("/employees", ListRegistrationEmployees)
+		reg.POST("/link-employee", LinkEmployeeUser)
+		reg.GET("/lecturers", ListRegistrationLecturers)
+		reg.POST("/link-lecturer", LinkLecturerUser)
+	}
+	return r
+}
+
+func TestListRegistrationEmployeesAndLink(t *testing.T) {
+	store := newMemoryStaffRegistrationStore()
+	r := setupStaffRegistrationTestRouter(t, store)
+	wEmpty := httptest.NewRecorder()
+	r.ServeHTTP(wEmpty, httptest.NewRequest(http.MethodGet, "/registration/employees", nil))
+	if wEmpty.Code != http.StatusOK || strings.TrimSpace(wEmpty.Body.String()) != "[]" {
+		t.Fatalf("empty employees = %d %q, want 200 []", wEmpty.Code, wEmpty.Body.String())
+	}
+	emp1 := uuid.New()
+	emp2 := uuid.New()
+	user2 := uuid.New()
+	credA := uuid.New()
+	facID := uuid.New()
+	created := time.Date(2026, 11, 5, 8, 0, 0, 0, time.UTC)
+	store.empRows = []employeeRegistrationJoinRow{
+		{ID: emp1, Name: "Finance Staff", Username: "EMP-FIN-001", Department: strPtr("Finance"), JobRole: models.JobRoleFinance},
+		{ID: emp2, Name: "Student Affairs FCS", Username: "EMP-SA-FCS-001", Department: strPtr("Student Affairs"), JobRole: models.JobRoleStudentAffairs, FacultyID: &facID, FacultyCode: strPtr("FCS"), FacultyName: strPtr("Faculty of Computer Science"), UserID: &user2, Email: strPtr("sa.fcs@campus.edu"), CreatedAt: &created, CredentialID: nil},
+		{ID: emp2, Name: "Student Affairs FCS", Username: "EMP-SA-FCS-001", Department: strPtr("Student Affairs"), JobRole: models.JobRoleStudentAffairs, FacultyID: &facID, FacultyCode: strPtr("FCS"), FacultyName: strPtr("Faculty of Computer Science"), UserID: &user2, Email: strPtr("sa.fcs@campus.edu"), CreatedAt: &created, CredentialID: &credA},
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/registration/employees", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var got []RegistrationEmployeeRow
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	if got[0].Username != "EMP-FIN-001" || got[0].IsRegistered || got[0].JobRole != models.JobRoleFinance {
+		t.Errorf("got[0] = %+v", got[0])
+	}
+	if got[1].Username != "EMP-SA-FCS-001" || !got[1].IsRegistered || got[1].FacultyCode == nil || *got[1].FacultyCode != "FCS" {
+		t.Errorf("got[1] = %+v", got[1])
+	}
+	store.empByBadge["EMP-FIN-001"] = emp1
+	finUserID := uuid.New()
+	store.usersByName["EMP-FIN-001"] = &models.User{ID: finUserID, Username: "EMP-FIN-001", Email: "fin@campus.edu", CreatedAt: created, UserType: models.UserTypeEmployee}
+	if wBad := performPostJSON(r, "/registration/link-employee", map[string]any{"employeeId": "bad-uuid", "username": "EMP-FIN-001"}); wBad.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d", wBad.Code)
+	}
+	if wMiss := performPostJSON(r, "/registration/link-employee", map[string]any{"employeeId": emp1.String(), "username": "EMP-MISSING"}); wMiss.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d", wMiss.Code)
+	}
+	if err := linkEmployeeAfterRegistration("EMP-FIN-001", finUserID); err != nil {
+		t.Fatalf("linkEmployeeAfterRegistration: %v", err)
+	}
+	if store.empLink[emp1] != finUserID {
+		t.Fatalf("expected auto-linked employee userID %s, got %s", finUserID, store.empLink[emp1])
+	}
+	wLink := performPostJSON(r, "/registration/link-employee", map[string]any{"employeeId": emp1.String(), "username": "EMP-FIN-001"})
+	if wLink.Code != http.StatusOK {
+		t.Fatalf("link-employee = %d: %s", wLink.Code, wLink.Body.String())
+	}
+}
+
+func TestListRegistrationLecturersAndLink(t *testing.T) {
+	store := newMemoryStaffRegistrationStore()
+	r := setupStaffRegistrationTestRouter(t, store)
+	wEmpty := httptest.NewRecorder()
+	r.ServeHTTP(wEmpty, httptest.NewRequest(http.MethodGet, "/registration/lecturers", nil))
+	if wEmpty.Code != http.StatusOK || strings.TrimSpace(wEmpty.Body.String()) != "[]" {
+		t.Fatalf("empty lecturers = %d %q, want 200 []", wEmpty.Code, wEmpty.Body.String())
+	}
+	lec1 := uuid.New()
+	lec2 := uuid.New()
+	user2 := uuid.New()
+	credA := uuid.New()
+	facID := uuid.New()
+	created := time.Date(2026, 11, 5, 8, 30, 0, 0, time.UTC)
+	store.lecRows = []lecturerRegistrationJoinRow{
+		{ID: lec1, Name: "Dr. Hendra", Username: "LEC-FCS-001", Department: strPtr("Computer Science"), FacultyID: &facID, FacultyCode: strPtr("FCS"), FacultyName: strPtr("Faculty of Computer Science")},
+		{ID: lec2, Name: "Prof. Sari", Username: "LEC-ENG-001", Department: strPtr("Civil Engineering"), UserID: &user2, Email: strPtr("sari@campus.edu"), CreatedAt: &created, CredentialID: &credA},
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/registration/lecturers", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var got []RegistrationLecturerRow
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	if got[0].Username != "LEC-FCS-001" || got[0].IsRegistered || got[0].FacultyCode == nil || *got[0].FacultyCode != "FCS" {
+		t.Errorf("got[0] = %+v", got[0])
+	}
+	if got[1].Username != "LEC-ENG-001" || !got[1].IsRegistered {
+		t.Errorf("got[1] = %+v", got[1])
+	}
+	store.lecByBadge["LEC-FCS-001"] = lec1
+	lecUserID := uuid.New()
+	store.usersByName["LEC-FCS-001"] = &models.User{ID: lecUserID, Username: "LEC-FCS-001", Email: "hendra@campus.edu", CreatedAt: created, UserType: models.UserTypeLecturer}
+	if wBad := performPostJSON(r, "/registration/link-lecturer", map[string]any{"lecturerId": "bad-uuid", "username": "LEC-FCS-001"}); wBad.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d", wBad.Code)
+	}
+	if wMiss := performPostJSON(r, "/registration/link-lecturer", map[string]any{"lecturerId": lec1.String(), "username": "LEC-MISSING"}); wMiss.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d", wMiss.Code)
+	}
+	if err := linkLecturerAfterRegistration("LEC-FCS-001", lecUserID); err != nil {
+		t.Fatalf("linkLecturerAfterRegistration: %v", err)
+	}
+	if store.lecLink[lec1] != lecUserID {
+		t.Fatalf("expected auto-linked lecturer userID %s, got %s", lecUserID, store.lecLink[lec1])
+	}
+	wLink := performPostJSON(r, "/registration/link-lecturer", map[string]any{"lecturerId": lec1.String(), "username": "LEC-FCS-001"})
+	if wLink.Code != http.StatusOK {
+		t.Fatalf("link-lecturer = %d: %s", wLink.Code, wLink.Body.String())
+	}
+}
