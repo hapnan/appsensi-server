@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/google/uuid"
 	"gorm.io/gorm/schema"
 )
 
@@ -15,6 +16,8 @@ func TestModelColumnNamesMatchJSONTags(t *testing.T) {
 		&User{},
 		&WebAuthnUser{},
 		&Credential{},
+		&Employee{},
+		&Lecturer{},
 		&Student{},
 		&StudentSchedule{},
 		&Attendance{},
@@ -209,5 +212,156 @@ func TestSafeUint32SignCountAndCredentialFlags(t *testing.T) {
 	})
 	if len(flags) != 1 || flags[0] != (1|2|8) {
 		t.Fatalf("EncodeCredentialFlags = %v, want [11]", flags)
+	}
+}
+
+func assertBelongsToRelation(t *testing.T, s *schema.Schema, relName, wantPK, wantFK string) {
+	t.Helper()
+	rel := s.Relationships.Relations[relName]
+	if rel == nil {
+		t.Fatalf("%s.%s relationship not found", s.Name, relName)
+	}
+	if rel.Type != schema.BelongsTo {
+		t.Fatalf("%s.%s relationship Type = %q, want %q", s.Name, relName, rel.Type, schema.BelongsTo)
+	}
+	if len(rel.References) != 1 || rel.References[0].PrimaryKey.DBName != wantPK || rel.References[0].ForeignKey.DBName != wantFK {
+		t.Fatalf("%s.%s invalid reference mapping: %+v", s.Name, relName, rel.References)
+	}
+}
+
+func TestEmployeeLecturerAndUpdatedSchemaAlignment(t *testing.T) {
+	cache := &sync.Map{}
+	namer := schema.NamingStrategy{}
+
+	userSchema, err := schema.Parse(&User{}, cache, namer)
+	if err != nil {
+		t.Fatalf("failed to parse User schema: %v", err)
+	}
+	userTypeField := userSchema.LookUpField("UserType")
+	if userTypeField == nil {
+		t.Fatal("User.UserType field not found")
+	}
+	if userTypeField.DBName != "user_type" {
+		t.Fatalf("User.UserType DBName = %q, want user_type", userTypeField.DBName)
+	}
+	if string(userTypeField.DataType) != "text" {
+		t.Fatalf("User.UserType DataType = %q, want text", userTypeField.DataType)
+	}
+	if !userTypeField.NotNull {
+		t.Fatal("expected User.UserType to be NOT NULL")
+	}
+	assertSchemaIndexColumns(t, userSchema, "users_user_type_idx", []string{"user_type"})
+
+	empSchema, err := schema.Parse(&Employee{}, cache, namer)
+	if err != nil {
+		t.Fatalf("failed to parse Employee schema: %v", err)
+	}
+	for colName, wantType := range map[string]string{"employee_id": "text", "job_role": "text", "faculty_id": "uuid", "user_id": "uuid"} {
+		f := empSchema.LookUpField(colName)
+		if f == nil {
+			t.Fatalf("Employee.%s field not found", colName)
+		}
+		if string(f.DataType) != wantType {
+			t.Fatalf("Employee.%s DataType = %q, want %q", colName, f.DataType, wantType)
+		}
+	}
+	assertBelongsToRelation(t, empSchema, "Faculty", "id", "faculty_id")
+	assertBelongsToRelation(t, empSchema, "User", "id", "user_id")
+	assertSchemaIndexColumns(t, empSchema, "employees_job_role_idx", []string{"job_role"})
+	assertSchemaIndexColumns(t, empSchema, "employees_faculty_idx", []string{"faculty_id"})
+	assertSchemaIndexColumns(t, empSchema, "employees_role_faculty_idx", []string{"job_role", "faculty_id"})
+	assertSchemaIndexColumns(t, empSchema, "employees_user_idx", []string{"user_id"})
+	lecSchema, err := schema.Parse(&Lecturer{}, cache, namer)
+	if err != nil {
+		t.Fatalf("failed to parse Lecturer schema: %v", err)
+	}
+	for colName, wantType := range map[string]string{"lecturer_id": "text", "faculty_id": "uuid", "user_id": "uuid"} {
+		f := lecSchema.LookUpField(colName)
+		if f == nil {
+			t.Fatalf("Lecturer.%s field not found", colName)
+		}
+		if string(f.DataType) != wantType {
+			t.Fatalf("Lecturer.%s DataType = %q, want %q", colName, f.DataType, wantType)
+		}
+	}
+	assertBelongsToRelation(t, lecSchema, "Faculty", "id", "faculty_id")
+	assertBelongsToRelation(t, lecSchema, "User", "id", "user_id")
+	assertSchemaIndexColumns(t, lecSchema, "lecturers_faculty_idx", []string{"faculty_id"})
+	assertSchemaIndexColumns(t, lecSchema, "lecturers_user_idx", []string{"user_id"})
+
+	stuSchema, err := schema.Parse(&Student{}, cache, namer)
+	if err != nil {
+		t.Fatalf("failed to parse Student schema: %v", err)
+	}
+	stuFacultyField := stuSchema.LookUpField("faculty_id")
+	if stuFacultyField == nil || string(stuFacultyField.DataType) != "uuid" {
+		t.Fatalf("Student.faculty_id = %+v, want uuid", stuFacultyField)
+	}
+	assertSchemaIndexColumns(t, stuSchema, "students_faculty_idx", []string{"faculty_id"})
+	assertBelongsToRelation(t, stuSchema, "Faculty", "id", "faculty_id")
+
+	csSchema, err := schema.Parse(&ClassSchedule{}, cache, namer)
+	if err != nil {
+		t.Fatalf("failed to parse ClassSchedule schema: %v", err)
+	}
+	csLecturerField := csSchema.LookUpField("lecturer_id")
+	if csLecturerField == nil || string(csLecturerField.DataType) != "uuid" {
+		t.Fatalf("ClassSchedule.lecturer_id = %+v, want uuid", csLecturerField)
+	}
+	assertSchemaIndexColumns(t, csSchema, "class_schedules_lecturer_idx", []string{"lecturer_id"})
+	assertBelongsToRelation(t, csSchema, "Lecturer", "id", "lecturer_id")
+
+	lecBadgeField := lecSchema.LookUpField("LecturerID")
+	if lecBadgeField == nil || string(lecBadgeField.DataType) != "text" {
+		t.Fatalf("Lecturer.LecturerID DataType = %+v after parsing ClassSchedule, want text", lecBadgeField)
+	}
+
+	for _, ut := range []UserType{UserTypeStudent, UserTypeEmployee, UserTypeLecturer} {
+		if !IsValidUserType(ut) {
+			t.Errorf("expected IsValidUserType(%q) = true", ut)
+		}
+	}
+	for _, badUT := range []UserType{"", "admin", "staff"} {
+		if IsValidUserType(badUT) {
+			t.Errorf("expected IsValidUserType(%q) = false", badUT)
+		}
+	}
+
+	for _, role := range []EmployeeJobRole{JobRoleFinance, JobRoleAcademicAffairs, JobRoleStudentAffairs} {
+		if !IsValidEmployeeJobRole(role) {
+			t.Errorf("expected IsValidEmployeeJobRole(%q) = true", role)
+		}
+	}
+	for _, badRole := range []EmployeeJobRole{"", "hr", "dean"} {
+		if IsValidEmployeeJobRole(badRole) {
+			t.Errorf("expected IsValidEmployeeJobRole(%q) = false", badRole)
+		}
+	}
+
+	facID := uuid.New()
+	zeroID := uuid.Nil
+	if err := ValidateEmployeeRoleScope(JobRoleFinance, nil); err != nil {
+		t.Errorf("ValidateEmployeeRoleScope(finance, nil) error: %v", err)
+	}
+	if err := ValidateEmployeeRoleScope(JobRoleFinance, &facID); err != nil {
+		t.Errorf("ValidateEmployeeRoleScope(finance, &facID) error: %v", err)
+	}
+	if err := ValidateEmployeeRoleScope(JobRoleAcademicAffairs, nil); err != nil {
+		t.Errorf("ValidateEmployeeRoleScope(academic_affairs, nil) error: %v", err)
+	}
+	if err := ValidateEmployeeRoleScope(JobRoleAcademicAffairs, &facID); err != nil {
+		t.Errorf("ValidateEmployeeRoleScope(academic_affairs, &facID) error: %v", err)
+	}
+	if err := ValidateEmployeeRoleScope(JobRoleStudentAffairs, nil); err == nil {
+		t.Error("expected ValidateEmployeeRoleScope(student_affairs, nil) to fail")
+	}
+	if err := ValidateEmployeeRoleScope(JobRoleStudentAffairs, &zeroID); err == nil {
+		t.Error("expected ValidateEmployeeRoleScope(student_affairs, uuid.Nil) to fail")
+	}
+	if err := ValidateEmployeeRoleScope(JobRoleStudentAffairs, &facID); err != nil {
+		t.Errorf("ValidateEmployeeRoleScope(student_affairs, &facID) error: %v", err)
+	}
+	if err := ValidateEmployeeRoleScope(EmployeeJobRole("invalid"), &facID); err == nil {
+		t.Error("expected ValidateEmployeeRoleScope(invalid, &facID) to fail")
 	}
 }

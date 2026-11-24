@@ -65,6 +65,8 @@ type ClassSchedule struct {
 	Course       *Course    `gorm:"foreignKey:CourseID;constraint:OnDelete:CASCADE" json:"-"`
 	RoomID       *uuid.UUID `gorm:"type:uuid;index:class_schedules_room_idx;index:class_schedules_day_room_idx,priority:1" json:"room_id"`
 	Room         *Room      `gorm:"foreignKey:RoomID;constraint:OnDelete:CASCADE" json:"-"`
+	LecturerID   *uuid.UUID `gorm:"type:uuid;index:class_schedules_lecturer_idx" json:"lecturer_id"`
+	Lecturer     *Lecturer  `gorm:"belongsTo;foreignKey:LecturerID;references:ID;constraint:OnDelete:SET NULL" json:"-"`
 	Section      *string    `gorm:"type:text;default:'A';uniqueIndex:class_schedules_course_sec_term_idx,priority:2" json:"section"`
 	Instructor   *string    `gorm:"type:text" json:"instructor"`
 	DayOfWeek    *string    `gorm:"type:text;index:class_schedules_day_room_idx,priority:2" json:"day_of_week"`

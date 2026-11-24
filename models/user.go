@@ -10,12 +10,32 @@ import (
 	"github.com/google/uuid"
 )
 
+// UserType represents the domain persona of an authenticated user.
+type UserType string
+
+const (
+	UserTypeStudent  UserType = "student"
+	UserTypeEmployee UserType = "employee"
+	UserTypeLecturer UserType = "lecturer"
+)
+
+// IsValidUserType checks whether t is a supported UserType.
+func IsValidUserType(t UserType) bool {
+	switch t {
+	case UserTypeStudent, UserTypeEmployee, UserTypeLecturer:
+		return true
+	default:
+		return false
+	}
+}
+
 // User corresponds to the "users" table
 type User struct {
 	ID           uuid.UUID     `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
 	Email        string        `gorm:"type:text;not null;unique" json:"email"`
 	Username     string        `gorm:"type:text;not null;unique" json:"username"`
 	DisplayName  *string       `gorm:"type:text" json:"display_name"`
+	UserType     UserType      `gorm:"type:text;not null;default:'student';index:users_user_type_idx" json:"user_type"`
 	WebAuthnUser *WebAuthnUser `gorm:"foreignKey:UserID" json:"-"`
 	Credentials  []Credential  `gorm:"foreignKey:UserID" json:"-"`
 	CreatedAt    time.Time     `gorm:"type:timestamptz;not null;default:now()" json:"created_at"`
@@ -132,27 +152,27 @@ func (WebAuthnUser) TableName() string { return "webauthn_users" }
 
 // Credential corresponds to the "credentials" table
 type Credential struct {
-	ID                uuid.UUID                       `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
-	UserID            uuid.UUID                       `gorm:"type:uuid;not null;uniqueIndex:credentials_user_credential_idx,priority:1" json:"user_id"`
-	User              User                            `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE" json:"-"`
-	CredentialID      []byte                          `gorm:"type:bytea;not null;unique;uniqueIndex:credentials_user_credential_idx,priority:2" json:"credential_id"`
-	AAGUID            []byte                          `gorm:"column:aaguid;type:bytea;not null" json:"aaguid"`
-	PublicKey         []byte                          `gorm:"type:bytea;not null" json:"public_key"`
-	AttestationType   string                          `gorm:"type:text;not null" json:"attestation_type"`
-	AttestationFormat string                          `gorm:"type:text;not null" json:"attestation_format"`
-	Attestation       []byte                          `gorm:"type:bytea" json:"attestation"`
-	Transport         string                          `gorm:"type:text;not null" json:"transport"`
-	SignCount         int64                           `gorm:"type:bigint;not null;default:0" json:"sign_count"`
-	CloneWarning      bool                            `gorm:"type:boolean;not null;default:false" json:"clone_warning"`
+	ID                uuid.UUID                        `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	UserID            uuid.UUID                        `gorm:"type:uuid;not null;uniqueIndex:credentials_user_credential_idx,priority:1" json:"user_id"`
+	User              User                             `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE" json:"-"`
+	CredentialID      []byte                           `gorm:"type:bytea;not null;unique;uniqueIndex:credentials_user_credential_idx,priority:2" json:"credential_id"`
+	AAGUID            []byte                           `gorm:"column:aaguid;type:bytea;not null" json:"aaguid"`
+	PublicKey         []byte                           `gorm:"type:bytea;not null" json:"public_key"`
+	AttestationType   string                           `gorm:"type:text;not null" json:"attestation_type"`
+	AttestationFormat string                           `gorm:"type:text;not null" json:"attestation_format"`
+	Attestation       []byte                           `gorm:"type:bytea" json:"attestation"`
+	Transport         string                           `gorm:"type:text;not null" json:"transport"`
+	SignCount         int64                            `gorm:"type:bigint;not null;default:0" json:"sign_count"`
+	CloneWarning      bool                             `gorm:"type:boolean;not null;default:false" json:"clone_warning"`
 	Attachment        protocol.AuthenticatorAttachment `gorm:"type:text;column:attachment;not null" json:"attachment"`
-	Flags             []byte                          `gorm:"type:bytea" json:"flags"`
-	Presence          bool                            `gorm:"type:boolean;not null;default:false" json:"presence"`
-	Verified          bool                            `gorm:"type:boolean;not null;default:false" json:"verified"`
-	BackupEligible    bool                            `gorm:"type:boolean;not null;default:false" json:"backup_eligible"`
-	BackupState       bool                            `gorm:"type:boolean;not null;default:false" json:"backup_state"`
-	Extensions        []byte                          `gorm:"type:bytea" json:"extensions"`
-	CreatedAt         time.Time                       `gorm:"type:timestamptz;not null;default:now()" json:"created_at"`
-	LastUsedAt        *time.Time                      `gorm:"type:timestamptz" json:"last_used_at"`
+	Flags             []byte                           `gorm:"type:bytea" json:"flags"`
+	Presence          bool                             `gorm:"type:boolean;not null;default:false" json:"presence"`
+	Verified          bool                             `gorm:"type:boolean;not null;default:false" json:"verified"`
+	BackupEligible    bool                             `gorm:"type:boolean;not null;default:false" json:"backup_eligible"`
+	BackupState       bool                             `gorm:"type:boolean;not null;default:false" json:"backup_state"`
+	Extensions        []byte                           `gorm:"type:bytea" json:"extensions"`
+	CreatedAt         time.Time                        `gorm:"type:timestamptz;not null;default:now()" json:"created_at"`
+	LastUsedAt        *time.Time                       `gorm:"type:timestamptz" json:"last_used_at"`
 }
 
 func (Credential) TableName() string { return "credentials" }
