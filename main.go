@@ -47,12 +47,75 @@ func main() {
 		attendanceGroup.POST("/check-in", controllers.CheckIn)
 	}
 
-	// Student Passkey Registration Routes
+	// Passkey Registration Routes
 	registrationGroup := r.Group("/registration")
 	{
 		registrationGroup.GET("/list", controllers.ListRegistrationStudents)
 		registrationGroup.POST("/link-student", controllers.LinkStudentUser)
+		registrationGroup.GET("/employees", controllers.ListRegistrationEmployees)
+		registrationGroup.POST("/link-employee", controllers.LinkEmployeeUser)
+		registrationGroup.GET("/lecturers", controllers.ListRegistrationLecturers)
+		registrationGroup.POST("/link-lecturer", controllers.LinkLecturerUser)
 		registrationGroup.POST("/cleanup-incomplete", controllers.CleanupIncompleteUser)
+	}
+
+	// Dashboard Routes
+	dashboardGroup := r.Group("/dashboard")
+	{
+		dashboardGroup.GET("/me", controllers.GetDashboardMe)
+
+		financeGroup := dashboardGroup.Group("/finance")
+		{
+			financeGroup.GET("/summary", controllers.GetFinanceDashboardSummary)
+			financeGroup.GET("/students", controllers.ListFinanceDashboardStudents)
+		}
+
+		academicGroup := dashboardGroup.Group("/academic")
+		{
+			academicGroup.GET("/summary", controllers.GetAcademicDashboardSummary)
+			academicGroup.GET("/faculties", controllers.ListAcademicFaculties)
+			academicGroup.POST("/faculties", controllers.CreateAcademicFaculty)
+			academicGroup.PUT("/faculties/:id", controllers.UpdateAcademicFaculty)
+			academicGroup.GET("/courses", controllers.ListAcademicCourses)
+			academicGroup.POST("/courses", controllers.CreateAcademicCourse)
+			academicGroup.PUT("/courses/:id", controllers.UpdateAcademicCourse)
+			academicGroup.DELETE("/courses/:id", controllers.DeleteAcademicCourse)
+			academicGroup.GET("/lecturers", controllers.ListAcademicLecturers)
+			academicGroup.POST("/lecturers", controllers.CreateAcademicLecturer)
+			academicGroup.PUT("/lecturers/:id", controllers.UpdateAcademicLecturer)
+			academicGroup.DELETE("/lecturers/:id", controllers.DeleteAcademicLecturer)
+			academicGroup.GET("/employees", controllers.ListAcademicEmployees)
+			academicGroup.POST("/employees", controllers.CreateAcademicEmployee)
+			academicGroup.PUT("/employees/:id", controllers.UpdateAcademicEmployee)
+			academicGroup.DELETE("/employees/:id", controllers.DeleteAcademicEmployee)
+			academicGroup.GET("/schedules", controllers.ListAcademicSchedules)
+			academicGroup.POST("/schedules", controllers.CreateAcademicSchedule)
+			academicGroup.PUT("/schedules/:id", controllers.UpdateAcademicSchedule)
+			academicGroup.DELETE("/schedules/:id", controllers.DeleteAcademicSchedule)
+		}
+
+		studentAffairsGroup := dashboardGroup.Group("/student-affairs")
+		{
+			studentAffairsGroup.GET("/summary", controllers.GetStudentAffairsDashboardSummary)
+			studentAffairsGroup.GET("/students", controllers.ListStudentAffairsStudents)
+			studentAffairsGroup.POST("/students", controllers.CreateStudentAffairsStudent)
+			studentAffairsGroup.PUT("/students/:id", controllers.UpdateStudentAffairsStudent)
+			studentAffairsGroup.DELETE("/students/:id", controllers.DeleteStudentAffairsStudent)
+			studentAffairsGroup.GET("/students/:id/schedules", controllers.ListStudentAffairsStudentSchedules)
+			studentAffairsGroup.POST("/students/:id/schedules", controllers.EnrollStudentAffairsStudentSchedule)
+			studentAffairsGroup.DELETE("/students/:id/schedules/:scheduleId", controllers.DropStudentAffairsStudentSchedule)
+			studentAffairsGroup.GET("/attendance", controllers.ListStudentAffairsAttendance)
+		}
+
+		lecturerGroup := dashboardGroup.Group("/lecturer")
+		{
+			lecturerGroup.GET("/summary", controllers.GetLecturerDashboardSummary)
+			lecturerGroup.GET("/schedules", controllers.ListLecturerSchedules)
+			lecturerGroup.GET("/schedules/:scheduleId/students", controllers.ListLecturerScheduleStudents)
+			lecturerGroup.GET("/schedules/:scheduleId/attendance", controllers.GetLecturerScheduleAttendance)
+			lecturerGroup.POST("/schedules/:scheduleId/attendance", controllers.RecordLecturerScheduleAttendance)
+			lecturerGroup.DELETE("/schedules/:scheduleId/attendance/:studentId", controllers.DeleteLecturerScheduleAttendance)
+		}
 	}
 
 	if config.IsConformanceEnabled() {
