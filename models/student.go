@@ -12,6 +12,8 @@ type Student struct {
 	StudentID  string     `gorm:"type:text;not null;unique" json:"student_id"`
 	Name       string     `gorm:"type:text;not null" json:"name"`
 	Department *string    `gorm:"type:text" json:"department"`
+	FacultyID  *uuid.UUID `gorm:"type:uuid;index:students_faculty_idx" json:"faculty_id"`
+	Faculty    *Faculty   `gorm:"belongsTo;foreignKey:FacultyID;references:ID;constraint:OnDelete:SET NULL" json:"-"`
 	PhotoURL   *string    `gorm:"type:text;column:photo_url" json:"photo_url"`
 	UserID     *uuid.UUID `gorm:"type:uuid;index:students_user_idx" json:"user_id"`
 	User       *User      `gorm:"belongsTo;foreignKey:UserID;references:ID;constraint:OnDelete:SET NULL" json:"-"`
