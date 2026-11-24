@@ -117,6 +117,12 @@ func TestManagedModels_SharedSchemaCachePreservesColumnTypes(t *testing.T) {
 
 	// Parse all models together into a single shared cache (exactly as db.AutoMigrate does)
 	// and verify no foreign-key relationship guess mutates a column's DataType.
+	for _, table := range []string{"employees", "lecturers", "students", "class_schedules", "users"} {
+		if _, ok := declaredTypes[table]; !ok {
+			t.Fatalf("expected table %q in managedModels()", table)
+		}
+	}
+
 	sharedCache := &sync.Map{}
 	parsed := make([]*schema.Schema, 0, len(models))
 	for _, m := range models {
@@ -139,4 +145,3 @@ func TestManagedModels_SharedSchemaCachePreservesColumnTypes(t *testing.T) {
 		}
 	}
 }
-

@@ -26,9 +26,10 @@ var supplementaryIndexStatements = []string{
 	`CREATE INDEX IF NOT EXISTS class_schedules_room_norm_day_idx ON class_schedules (room_id, lower(trim(day_of_week)))`,
 	`CREATE INDEX IF NOT EXISTS student_schedules_class_status_student_idx ON student_schedules (class_schedule_id, status, student_id)`,
 	`CREATE INDEX IF NOT EXISTS attendance_schedule_date_student_idx ON attendance (class_schedule_id, session_date, student_id)`,
+	`CREATE INDEX IF NOT EXISTS employees_role_faculty_user_idx ON employees (job_role, faculty_id, user_id)`,
 }
 
-var analyzeTablesStatement = `ANALYZE users, webauthn_users, credentials, rooms, class_schedules, students, student_schedules, attendance`
+var analyzeTablesStatement = `ANALYZE users, webauthn_users, credentials, buildings, rooms, faculties, courses, lecturers, employees, class_schedules, students, student_schedules, attendance`
 
 func managedModels() []any {
 	return []any{
@@ -39,6 +40,8 @@ func managedModels() []any {
 		&models.Room{},
 		&models.Faculty{},
 		&models.Course{},
+		&models.Lecturer{},
+		&models.Employee{},
 		&models.ClassSchedule{},
 		&models.Student{},
 		&models.StudentSchedule{},

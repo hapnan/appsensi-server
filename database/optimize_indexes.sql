@@ -30,4 +30,28 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS attendance_schedule_date_student_idx
 CREATE INDEX CONCURRENTLY IF NOT EXISTS class_schedules_room_norm_day_idx
     ON class_schedules (room_id, lower(trim(day_of_week)));
 
-ANALYZE users, webauthn_users, credentials, rooms, class_schedules, students, student_schedules, attendance;
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS employees_employee_id_unique_idx
+    ON employees (employee_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS employees_user_idx
+    ON employees (user_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS employees_role_faculty_idx
+    ON employees (job_role, faculty_id);
+
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS lecturers_lecturer_id_unique_idx
+    ON lecturers (lecturer_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS lecturers_user_idx
+    ON lecturers (user_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS lecturers_faculty_idx
+    ON lecturers (faculty_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS students_faculty_idx
+    ON students (faculty_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS class_schedules_lecturer_idx
+    ON class_schedules (lecturer_id);
+
+ANALYZE users, webauthn_users, credentials, buildings, rooms, faculties, courses, lecturers, employees, class_schedules, students, student_schedules, attendance;
